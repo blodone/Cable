@@ -1,10 +1,11 @@
+
 import sys
 import subprocess
 import json
 import re
 import fcntl
 import os
-from PyQt5.QtCore import Qt, QTimer, QFile
+from PyQt5.QtCore import Qt, QTimer, QFile, QMargins
 from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QLineEdit, QPushButton, QLabel,
@@ -23,6 +24,7 @@ class PipeWireSettingsApp(QWidget):
     def create_section_group(self, title, layout):
         group = QGroupBox()
         group.setLayout(layout)
+        group.setContentsMargins(QMargins(5, 10, 5, 10))  # Adjust margins
 
         title_font = QFont()
         title_font.setBold(True)
@@ -38,6 +40,7 @@ class PipeWireSettingsApp(QWidget):
 
     def initUI(self):
         main_layout = QVBoxLayout()
+        main_layout.setSpacing(10) # Adjust main layout spacing
 
         # Audio Profile Section
         profile_layout = QVBoxLayout()
@@ -83,14 +86,21 @@ class PipeWireSettingsApp(QWidget):
         quantum_select_layout.addWidget(self.quantum_combo)
         quantum_layout.addLayout(quantum_select_layout)
 
+        quantum_buttons_layout = QHBoxLayout()
         self.apply_quantum_button = QPushButton("Apply Quantum")
         self.apply_quantum_button.clicked.connect(self.apply_quantum_settings)
-        quantum_layout.addWidget(self.apply_quantum_button)
+        quantum_buttons_layout.addWidget(self.apply_quantum_button)
         self.quantum_combo.lineEdit().returnPressed.connect(self.apply_quantum_settings)
 
         self.reset_quantum_button = QPushButton("Reset Quantum")
         self.reset_quantum_button.clicked.connect(self.reset_quantum_settings)
-        quantum_layout.addWidget(self.reset_quantum_button)
+        quantum_buttons_layout.addWidget(self.reset_quantum_button)
+
+        self.refresh_quantum_button = QPushButton("Refresh")
+        self.refresh_quantum_button.clicked.connect(self.load_current_settings)
+        quantum_buttons_layout.addWidget(self.refresh_quantum_button)
+
+        quantum_layout.addLayout(quantum_buttons_layout)
 
         latency_display_layout = QHBoxLayout()
         self.latency_display_label = QLabel("Latency:")
@@ -115,14 +125,21 @@ class PipeWireSettingsApp(QWidget):
         sample_rate_select_layout.addWidget(self.sample_rate_combo)
         sample_rate_layout.addLayout(sample_rate_select_layout)
 
+        sample_rate_buttons_layout = QHBoxLayout()
         self.apply_sample_rate_button = QPushButton("Apply Sample Rate")
         self.apply_sample_rate_button.clicked.connect(self.apply_sample_rate_settings)
-        sample_rate_layout.addWidget(self.apply_sample_rate_button)
+        sample_rate_buttons_layout.addWidget(self.apply_sample_rate_button)
         self.sample_rate_combo.lineEdit().returnPressed.connect(self.apply_sample_rate_settings)
 
         self.reset_sample_rate_button = QPushButton("Reset Sample Rate")
         self.reset_sample_rate_button.clicked.connect(self.reset_sample_rate_settings)
-        sample_rate_layout.addWidget(self.reset_sample_rate_button)
+        sample_rate_buttons_layout.addWidget(self.reset_sample_rate_button)
+
+        self.refresh_sample_rate_button = QPushButton("Refresh")
+        self.refresh_sample_rate_button.clicked.connect(self.load_current_settings)
+        sample_rate_buttons_layout.addWidget(self.refresh_sample_rate_button)
+
+        sample_rate_layout.addLayout(sample_rate_buttons_layout)
 
         main_layout.addWidget(self.create_section_group("Sample Rate", sample_rate_layout))
 
@@ -178,8 +195,8 @@ class PipeWireSettingsApp(QWidget):
 
         self.setLayout(main_layout)
         self.setWindowTitle('Cable')
-        self.setMinimumSize(454, 771)  # Set minimum window size
-        self.resize(454, 771)  # Set initial size to the minimum
+        self.setMinimumSize(454, 705)  # Set minimum window size
+        self.resize(454, 705)  # Set initial size to the minimum
 
         self.load_nodes()
         self.load_devices()
@@ -282,14 +299,14 @@ class PipeWireSettingsApp(QWidget):
             }
         """)
     def confirm_restart_wireplumber(self):
-        reply = QMessageBox.question(self, 'Confirm Restart', 
+        reply = QMessageBox.question(self, 'Confirm Restart',
                                      "Are you sure you want to restart Wireplumber?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.restart_wireplumber()
 
     def confirm_restart_pipewire(self):
-        reply = QMessageBox.question(self, 'Confirm Restart', 
+        reply = QMessageBox.question(self, 'Confirm Restart',
                                      "Are you sure you want to restart Pipewire?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
@@ -320,17 +337,16 @@ class PipeWireSettingsApp(QWidget):
         self.load_current_settings()
         self.load_devices()
         self.load_nodes()
-        
+
         # Reset device and node selections
         self.device_combo.setCurrentIndex(0)
         self.node_combo.setCurrentIndex(0)
-        
+
         # Clear profile and latency input
         self.profile_combo.clear()
         self.latency_input.clear()
-        
-       # QMessageBox.information(self, "Reload Complete", "Application settings have been reloaded.")
 
+       # QMessageBox.information(self, "Reload Complete", "Application settings have been reloaded.")
 
     def load_devices(self):
         self.device_combo.clear()
@@ -400,7 +416,7 @@ class PipeWireSettingsApp(QWidget):
     def load_latency_offset(self, node_id):
         try:
             output = subprocess.check_output(["pw-cli", "e", node_id, "ProcessLatency"], universal_newlines=True)
-            
+
             # First, check for Long (nanoseconds) value
             ns_match = re.search(r'Long\s+(\d+)', output)
             if ns_match and int(ns_match.group(1)) > 0:
@@ -466,7 +482,7 @@ class PipeWireSettingsApp(QWidget):
                 command = f"pw-cli s {node_id} ProcessLatency '{{ ns = {latency_offset} }}'"
             else:
                 command = f"pw-cli s {node_id} ProcessLatency '{{ rate = {latency_offset} }}'"
-            
+
             subprocess.run(command, shell=True, check=True)
             print(f"Applied latency offset {latency_offset} to node {selected_node}")
         except subprocess.CalledProcessError as e:
@@ -531,7 +547,7 @@ class PipeWireSettingsApp(QWidget):
         try:
             # Get forced sample rate
             forced_rate = self.run_command("pw-metadata -n settings | grep clock.force-rate | awk -F\"'\" '{print $4}'")
-            
+
             if forced_rate == "0" or not forced_rate:
                 # If forced rate is 0 or not set, get the default rate
                 sample_rate = self.run_command("pw-metadata -n settings | grep clock.rate | awk -F\"'\" '{print $4}'")
@@ -540,7 +556,7 @@ class PipeWireSettingsApp(QWidget):
 
             # Get forced quantum
             forced_quantum = self.run_command("pw-metadata -n settings | grep clock.force-quantum | awk -F\"'\" '{print $4}'")
-            
+
             if forced_quantum == "0" or not forced_quantum:
                 # If forced quantum is 0 or not set, get the default quantum
                 quantum = self.run_command("pw-metadata -n settings | grep clock.quantum | awk -F\"'\" '{print $4}'")
@@ -596,27 +612,27 @@ class PipeWireSettingsApp(QWidget):
 def main():
     # Create a file lock
     lock_file = '/tmp/pipewire_settings_app.lock'
-    
+
     try:
         # Try to acquire the lock
         lock_handle = open(lock_file, 'w')
         fcntl.lockf(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        
+
         # If we got here, no other instance is running
         app = QApplication(sys.argv)
         ex = PipeWireSettingsApp()
         ex.show()
-        
+
         # Run the application
         exit_code = app.exec_()
-        
+
         # Release the lock
         fcntl.lockf(lock_handle, fcntl.LOCK_UN)
         lock_handle.close()
         os.unlink(lock_file)
-        
+
         sys.exit(exit_code)
-        
+
     except IOError:
         # Another instance is already running
         print("Another instance of PipeWireSettingsApp is already running.")
@@ -624,5 +640,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
