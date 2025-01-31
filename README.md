@@ -1,6 +1,6 @@
 # Cable
 PyQT GUI application to dynamically modify Pipewire and Wireplumber settings at runtime.
-Now, with side by side connections manager similar to Qjackctl. 
+Now, with side by side connections manager. 
 
 
 If you wonder what Latency option does, look [here](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html#alsa-extra-latency-properties). 
@@ -8,8 +8,9 @@ If you wonder what Latency option does, look [here](https://pipewire.pages.freed
 
 
 
-To start just run:
-`python Cable.py`, install using PKGBUILD or Arch package.
+To run, download Cable.py and connection-manager.py, put them in the same directory and start with:
+`python Cable.py`. 
+On Arch, install using PKGBUILD or Arch package.
 
 ![](https://github.com/magillos/Cable/blob/main/Cable.png)
 ![](https://github.com/magillos/Cable/blob/main/Cables.png)
