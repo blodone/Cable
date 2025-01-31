@@ -1,4 +1,3 @@
-
 import sys
 import subprocess
 import json
@@ -20,6 +19,7 @@ class PipeWireSettingsApp(QWidget):
         self.load_current_settings()
         self.tray_icon = None
         self.tray_enabled = False
+        self.connection_manager_process = None
 
     def create_section_group(self, title, layout):
         group = QGroupBox()
@@ -185,6 +185,26 @@ class PipeWireSettingsApp(QWidget):
         restart_layout.addLayout(restart_buttons_layout)
         main_layout.addWidget(self.create_section_group("Restart Services", restart_layout))
 
+
+
+        #Connections button
+        connections_button = QPushButton("Cables")
+        connections_button.clicked.connect(self.launch_connection_manager)
+        main_layout.addWidget(connections_button)
+
+        self.setLayout(main_layout)
+        self.setWindowTitle('Cable')
+        self.setMinimumSize(456, 820)  # Set minimum window size
+        self.resize(454, 820)  # Set initial size to the minimum
+
+        self.load_nodes()
+        self.load_devices()
+        self.device_combo.currentIndexChanged.connect(self.on_device_changed)
+        self.node_combo.currentIndexChanged.connect(self.on_node_changed)
+        self.quantum_combo.currentIndexChanged.connect(self.update_latency_display)
+        self.sample_rate_combo.currentIndexChanged.connect(self.update_latency_display)
+
+
         # System Tray Toggle Section
         tray_toggle_layout = QHBoxLayout()
         self.tray_toggle_checkbox = QCheckBox("Enable System Tray Icon")
@@ -193,17 +213,9 @@ class PipeWireSettingsApp(QWidget):
         tray_toggle_layout.addWidget(self.tray_toggle_checkbox)
         main_layout.addLayout(tray_toggle_layout)
 
-        self.setLayout(main_layout)
-        self.setWindowTitle('Cable')
-        self.setMinimumSize(454, 705)  # Set minimum window size
-        self.resize(454, 705)  # Set initial size to the minimum
 
-        self.load_nodes()
-        self.load_devices()
-        self.device_combo.currentIndexChanged.connect(self.on_device_changed)
-        self.node_combo.currentIndexChanged.connect(self.on_node_changed)
-        self.quantum_combo.currentIndexChanged.connect(self.update_latency_display)
-        self.sample_rate_combo.currentIndexChanged.connect(self.update_latency_display)
+
+
 
     def toggle_tray_icon(self, state):
         if state == Qt.Checked:
@@ -214,6 +226,8 @@ class PipeWireSettingsApp(QWidget):
             if self.tray_icon:
                 self.tray_icon.hide()
                 self.tray_icon = None
+
+
 
     def setup_tray_icon(self):
         if not self.tray_icon:
@@ -254,8 +268,10 @@ class PipeWireSettingsApp(QWidget):
         # Show the tray icon
         self.tray_icon.show()
 
+
+
     def tray_icon_activated(self, reason):
-      if reason == QSystemTrayIcon.Trigger:  # Left click
+     if reason == QSystemTrayIcon.Trigger:  # Left click
         if self.isMinimized() or not self.isVisible():
             self.showNormal()  # Restore window if minimized
             self.activateWindow()  # Bring window to the front
@@ -263,8 +279,38 @@ class PipeWireSettingsApp(QWidget):
             self.hide()  # Minimize to tray
 
 
+    def launch_connection_manager(self):
+    # Define possible locations for connection-manager.py
+        possible_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "connection-manager.py"),  # Same directory as cable.py
+        "/usr/share/cable/connection-manager.py"  ]
+
+        connection_manager_path = None
+
+        # Check each possible path
+        for path in possible_paths:
+            if os.path.exists(path):
+                connection_manager_path = path
+                break
+
+        if connection_manager_path is None:
+            print("Error: connection-manager.py not found in any of the expected locations.")
+            return
+
+        try:
+            # Store the process object in self.connection_manager_process
+            self.connection_manager_process = subprocess.Popen([sys.executable, connection_manager_path])
+        except Exception as e:
+            print(f"Error launching connection manager: {e}")
+
 
     def closeEvent(self, event):
+        # Override the closeEvent to terminate the connection-manager process
+        if self.connection_manager_process:
+            self.connection_manager_process.terminate()  # Terminate the process
+            self.connection_manager_process.wait()  # Wait for the process to terminate
+
+        # Handle the tray icon and other close events as before
         if self.tray_enabled and self.tray_icon:
             event.ignore()
             self.hide()
