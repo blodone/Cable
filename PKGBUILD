@@ -7,7 +7,7 @@ pkgdesc="A PyQt5 application to dynamically modify Pipewire and Wireplumber sett
 arch=('any')
 url="https://github.com/magillos/Cable"
 license=('GPL-3.0')
-depends=('python' 'python-pyqt5')
+depends=('python' 'python-pyqt5','python-jack-client')
 makedepends=('python-setuptools')
 source=(
   "Cable.py::https://raw.githubusercontent.com/magillos/Cable/master/Cable.py"

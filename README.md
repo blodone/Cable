@@ -9,7 +9,7 @@ If you wonder what Latency option does, look [here](https://pipewire.pages.freed
 
 
 To run, download Cable.py and connection-manager.py, put them in the same directory and start with:
-`python Cable.py`. 
+`python Cable.py`. You will need python jack client, see [here](https://pypi.org/project/JACK-Client/0.5.1/). 
 On Arch, install using PKGBUILD or Arch package.
 
 ![](https://github.com/magillos/Cable/blob/main/Cable.png)
