@@ -265,6 +265,11 @@ class JackConnectionManager(QMainWindow):
             self.timer.stop()
 
     def refresh_ports(self):
+        # Store current selections
+        selected_input = self.input_list.currentItem().text() if self.input_list.currentItem() else None
+        selected_output = self.output_list.currentItem().text() if self.output_list.currentItem() else None
+
+        # Clear lists
         self.input_list.clear()
         self.output_list.clear()
 
@@ -278,17 +283,33 @@ class JackConnectionManager(QMainWindow):
             elif port.is_output:
                 output_ports.append(port.name)
 
-        # Sort the ports alphabetically
-        input_ports.sort()
-        output_ports.sort()
+        # Sort the ports alphabetically, ignoring case
+        input_ports.sort(key=str.casefold)
+        output_ports.sort(key=str.casefold)
 
-        # Add sorted ports to their respective lists
-        for input_port in input_ports:
-            self.input_list.addItem(input_port)
-        for output_port in output_ports:
-            self.output_list.addItem(output_port)
+        # Add sorted ports and restore selections
+        for i, input_port in enumerate(input_ports):
+            item = QListWidgetItem(input_port)
+            self.input_list.addItem(item)
+            if input_port == selected_input:
+                self.input_list.setCurrentRow(i)
+
+        for i, output_port in enumerate(output_ports):
+            item = QListWidgetItem(output_port)
+            self.output_list.addItem(item)
+            if output_port == selected_output:
+                self.output_list.setCurrentRow(i)
 
         self.update_connections()
+
+        # Restore highlights based on current selection
+        if selected_input:
+            for output_port in self.client.get_ports(is_output=True):
+                if selected_input in [conn.name for conn in self.client.get_all_connections(output_port)]:
+                    self.highlight_output(output_port.name, auto_highlight=True)
+        elif selected_output:
+            for input_port in self.client.get_all_connections(selected_output):
+                self.highlight_input(input_port.name, auto_highlight=True)
 
     def make_connection(self, output_name, input_name):
         try:

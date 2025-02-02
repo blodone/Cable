@@ -1,7 +1,7 @@
 ### Maintainer: Your Name <your.email@example.com>
 
 pkgname=cable
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc="A PyQt5 application to dynamically modify Pipewire and Wireplumber settings"
 arch=('any')
@@ -18,12 +18,10 @@ source=(
 )
 
 sha256sums=('341bd9fd70a98a7b1ca013786c5fe5f034f1a306c46b1c57c62cdfed41a0a223'
-            '7ade1ba04f3eeac4621429098cf9ed37b14bbaf18cc31ccc757b49311f244949'
+            '1aa0a87fff5360f05e491ba62c0962b684e53d6ee45a070bf0ec86432f6df8c4'
             '5c3fa8b496c1a4a1918a2bfa2420cfa3ceedc93307d566a55c8f0835f3b33442'
             'a2a9f1eda97881a621f1ae24bc5c5ca7f7e79055f3673055f5cc922fe220609f'
-            'c7bc0fe27365b9fe5e8e8d6e1b48a8a44d9bade05e18685ecdd4375d22f6c3c4')
-
-
+            'f7f6b07b5f0f1d9cf18eaeee56e6c05ee58fc72c2a56419281112165011afef3')
 
 
 build() {
