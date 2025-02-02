@@ -1,7 +1,7 @@
 ### Maintainer: Your Name <your.email@example.com>
 
 pkgname=cable
-pkgver=0.2
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="A PyQt5 application to dynamically modify Pipewire and Wireplumber settings"
 arch=('any')
@@ -17,11 +17,12 @@ source=(
   "connection-manager.py::https://raw.githubusercontent.com/magillos/Cable/master/connection-manager.py"
 )
 
-sha256sums=('27da25fc5eb6d68cfbe44615f35e629fc3dc0b60762f3111be74298ab8cf3ad5'
-            'a7948c610345202d82a4f3462de39cd7e6224b535875fb98e2b5e72b6597705b'
+sha256sums=('341bd9fd70a98a7b1ca013786c5fe5f034f1a306c46b1c57c62cdfed41a0a223'
+            '7ade1ba04f3eeac4621429098cf9ed37b14bbaf18cc31ccc757b49311f244949'
             '5c3fa8b496c1a4a1918a2bfa2420cfa3ceedc93307d566a55c8f0835f3b33442'
             'a2a9f1eda97881a621f1ae24bc5c5ca7f7e79055f3673055f5cc922fe220609f'
-            'b0dadb2d996058640f64e033283654324cdd750dc60ef5320bc4331b78a8ad30')
+            'c7bc0fe27365b9fe5e8e8d6e1b48a8a44d9bade05e18685ecdd4375d22f6c3c4')
+
 
 
 

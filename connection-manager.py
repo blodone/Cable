@@ -81,16 +81,53 @@ class ConnectionView(QGraphicsView):
         super().resizeEvent(event)
         self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
 
+
+class ConnectionHistory:
+    def __init__(self):
+        self.history = []  # List of (action, output_name, input_name) tuples
+        self.current_index = -1
+
+    def add_action(self, action, output_name, input_name):
+        # Remove any future history when a new action is added
+        self.history = self.history[:self.current_index + 1]
+        self.history.append((action, output_name, input_name))
+        self.current_index += 1
+
+    def can_undo(self):
+        return self.current_index >= 0
+
+    def can_redo(self):
+        return self.current_index < len(self.history) - 1
+
+    def undo(self):
+        if self.can_undo():
+            action, output_name, input_name = self.history[self.current_index]
+            self.current_index -= 1
+            # Return the opposite action needed to undo
+            return ('connect' if action == 'disconnect' else 'disconnect', output_name, input_name)
+        return None
+
+    def redo(self):
+        if self.can_redo():
+            self.current_index += 1
+            return self.history[self.current_index]
+        return None
+
 class JackConnectionManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('JACK Connection Manager')
-        self.setGeometry(100, 100, 1350, 705)
+        self.setWindowTitle('Cables')
+        self.setGeometry(100, 100, 1500, 705)
 
         # Initialize JACK client
         self.client = jack.Client('ConnectionManager')
         self.connections = set()
         self.connection_colors = {}
+
+
+        # Initialize connection history
+        self.connection_history = ConnectionHistory()
+
 
         # Set up dark mode colors
         self.dark_mode = self.is_dark_mode()
@@ -148,6 +185,24 @@ class JackConnectionManager(QMainWindow):
         button_layout.addWidget(self.disconnect_button)
         button_layout.addWidget(self.refresh_button)
         button_layout.addWidget(self.auto_refresh_checkbox)
+
+        # Add undo/redo buttons to button layout
+        self.undo_button = QPushButton('Undo')
+        self.redo_button = QPushButton('Redo')
+        for button in [self.undo_button, self.redo_button]:
+            button.setStyleSheet(f"""
+                QPushButton {{ background-color: {self.button_color.name()}; color: {self.text_color.name()}; }}
+                QPushButton:hover {{ background-color: {self.highlight_color.name()}; }}
+            """)
+            button.setEnabled(False)
+
+        button_layout.addWidget(self.undo_button)
+        button_layout.addWidget(self.redo_button)
+
+        # Connect undo/redo buttons
+        self.undo_button.clicked.connect(self.undo_action)
+        self.redo_button.clicked.connect(self.redo_action)
+
 
         # Connection visualization
         self.connection_scene = QGraphicsScene()
@@ -212,16 +267,34 @@ class JackConnectionManager(QMainWindow):
     def refresh_ports(self):
         self.input_list.clear()
         self.output_list.clear()
+
+        # Get and sort input and output ports separately
+        input_ports = []
+        output_ports = []
+
         for port in self.client.get_ports():
             if port.is_input:
-                self.input_list.addItem(port.name)
+                input_ports.append(port.name)
             elif port.is_output:
-                self.output_list.addItem(port.name)
+                output_ports.append(port.name)
+
+        # Sort the ports alphabetically
+        input_ports.sort()
+        output_ports.sort()
+
+        # Add sorted ports to their respective lists
+        for input_port in input_ports:
+            self.input_list.addItem(input_port)
+        for output_port in output_ports:
+            self.output_list.addItem(output_port)
+
         self.update_connections()
 
     def make_connection(self, output_name, input_name):
         try:
             self.client.connect(output_name, input_name)
+            self.connection_history.add_action('connect', output_name, input_name)
+            self.update_undo_redo_buttons()
             self.update_connections()
             self.refresh_ports()
         except jack.JackError as e:
@@ -230,10 +303,46 @@ class JackConnectionManager(QMainWindow):
     def break_connection(self, output_name, input_name):
         try:
             self.client.disconnect(output_name, input_name)
+            self.connection_history.add_action('disconnect', output_name, input_name)
+            self.update_undo_redo_buttons()
             self.update_connections()
             self.refresh_ports()
         except jack.JackError as e:
             print(f"Disconnection error: {e}")
+
+    def update_undo_redo_buttons(self):
+        self.undo_button.setEnabled(self.connection_history.can_undo())
+        self.redo_button.setEnabled(self.connection_history.can_redo())
+
+    def undo_action(self):
+        action = self.connection_history.undo()
+        if action:
+            action_type, output_name, input_name = action
+            try:
+                if action_type == 'connect':
+                    self.client.connect(output_name, input_name)
+                else:
+                    self.client.disconnect(output_name, input_name)
+                self.update_undo_redo_buttons()
+                self.update_connections()
+                self.refresh_ports()
+            except jack.JackError as e:
+                print(f"Undo error: {e}")
+
+    def redo_action(self):
+        action = self.connection_history.redo()
+        if action:
+            action_type, output_name, input_name = action
+            try:
+                if action_type == 'connect':
+                    self.client.connect(output_name, input_name)
+                else:
+                    self.client.disconnect(output_name, input_name)
+                self.update_undo_redo_buttons()
+                self.update_connections()
+                self.refresh_ports()
+            except jack.JackError as e:
+                print(f"Redo error: {e}")
 
     def disconnect_node(self, node_name):
         if node_name in [port.name for port in self.client.get_ports(is_input=True)]:

@@ -250,13 +250,18 @@ class PipeWireSettingsApp(QWidget):
 
             # Create the menu
             tray_menu = QMenu()
-            show_action = QAction("Show", self)
+            show_action = QAction("Cable", self)
+            cables_action = QAction("Cables", self)
             quit_action = QAction("Quit", self)
+
             tray_menu.addAction(show_action)
+            tray_menu.addAction(cables_action)
+            tray_menu.addSeparator()
             tray_menu.addAction(quit_action)
 
             # Connect the actions
             show_action.triggered.connect(self.show)
+            cables_action.triggered.connect(self.open_cables)
             quit_action.triggered.connect(self.quit_app)
 
             # Set the menu for the tray icon
@@ -267,6 +272,23 @@ class PipeWireSettingsApp(QWidget):
 
         # Show the tray icon
         self.tray_icon.show()
+
+    def open_cables(self):
+        # Search for connection-manager.py in possible locations
+        possible_locations = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "connection-manager.py"),
+            "/usr/share/cable/connection-manager.py"
+        ]
+
+        cables_script = next((path for path in possible_locations if os.path.exists(path)), None)
+
+        if cables_script:
+            try:
+                subprocess.Popen(["python3", cables_script])
+            except subprocess.CalledProcessError as e:
+                QMessageBox.critical(self, "Error", f"Error opening Cables: {e}")
+        else:
+            QMessageBox.critical(self, "Error", "Could not find connection-manager.py")
 
 
 
