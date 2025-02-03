@@ -124,10 +124,8 @@ class JackConnectionManager(QMainWindow):
         self.connections = set()
         self.connection_colors = {}
 
-
         # Initialize connection history
         self.connection_history = ConnectionHistory()
-
 
         # Set up dark mode colors
         self.dark_mode = self.is_dark_mode()
@@ -175,7 +173,7 @@ class JackConnectionManager(QMainWindow):
         self.disconnect_button = QPushButton('Disconnect')
         self.refresh_button = QPushButton('Refresh')
         self.auto_refresh_checkbox = QCheckBox('Auto Refresh')
-        self.auto_refresh_checkbox.setChecked(False)
+        self.auto_refresh_checkbox.setChecked(True)
         for button in [self.connect_button, self.disconnect_button, self.refresh_button]:
             button.setStyleSheet(f"""
                 QPushButton {{ background-color: {self.button_color.name()}; color: {self.text_color.name()}; }}
@@ -203,7 +201,6 @@ class JackConnectionManager(QMainWindow):
         self.undo_button.clicked.connect(self.undo_action)
         self.redo_button.clicked.connect(self.redo_action)
 
-
         # Connection visualization
         self.connection_scene = QGraphicsScene()
         self.connection_view = ConnectionView(self.connection_scene)
@@ -221,17 +218,26 @@ class JackConnectionManager(QMainWindow):
         self.refresh_button.clicked.connect(self.refresh_ports)
         self.auto_refresh_checkbox.stateChanged.connect(self.toggle_auto_refresh)
 
-        self.refresh_ports()
+        # Initialize and start the timer
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh_ports)
-        self.timer.stop()
+        self.toggle_auto_refresh(Qt.Checked if self.auto_refresh_checkbox.isChecked() else Qt.Unchecked)
+
+        # Initial refresh
+        self.refresh_ports()
         self.quick_refresh_startup()
-       # self.adjust_window_size()
+
+    def toggle_auto_refresh(self, state):
+        if state == Qt.Checked:
+            self.timer.start(1000)
+        else:
+            self.timer.stop()
 
     def quick_refresh_startup(self):
-        self.refresh_ports()
-        QTimer.singleShot(500, self.refresh_ports)
-        QTimer.singleShot(1000, self.refresh_ports)
+        if not self.auto_refresh_checkbox.isChecked():
+            self.refresh_ports()
+            QTimer.singleShot(500, self.refresh_ports)
+            QTimer.singleShot(1000, self.refresh_ports)
 
     def adjust_window_size(self):
         self.input_list.updateGeometry()
