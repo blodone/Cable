@@ -32,7 +32,8 @@ class DragListWidget(QListWidget):
         if item:
             menu = QMenu(self)
             disconnect_action = QAction("Disconnect", self)
-            disconnect_action.triggered.connect(lambda: self.window().disconnect_node(item.text()))
+            # Pass the item's text (port name) instead of the item itself
+            disconnect_action.triggered.connect(lambda checked, name=item.text(): self.window().disconnect_node(name))
             menu.addAction(disconnect_action)
             menu.exec_(self.mapToGlobal(position))
 
@@ -63,7 +64,8 @@ class DropListWidget(QListWidget):
         if item:
             menu = QMenu(self)
             disconnect_action = QAction("Disconnect", self)
-            disconnect_action.triggered.connect(lambda: self.window().disconnect_node(item.text()))
+            # Pass the item's text (port name) instead of the item itself
+            disconnect_action.triggered.connect(lambda checked, name=item.text(): self.window().disconnect_node(name))
             menu.addAction(disconnect_action)
             menu.exec_(self.mapToGlobal(position))
 
