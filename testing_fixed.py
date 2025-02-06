@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGraphicsPathItem, QCheckBox, QMenu, QAction, QSizePolicy, QSpacerItem)
 from PyQt5.QtCore import Qt, QMimeData, QLineF, QPointF, QRectF, QTimer, QSize, QRect
 from PyQt5.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
-                         QPainterPath, QFontMetrics, QFont)  # Import QFont
+                         QPainterPath, QFontMetrics, QFont)
 import jack
 
 class ElidedListWidgetItem(QListWidgetItem):
@@ -46,17 +46,20 @@ class DragListWidget(QListWidget):
         item = self.currentItem()
         if item:
             mime_data = QMimeData()
-            mime_data.setText(item.full_text)
+            # Use item.full_text if ElidedListWidgetItem, else item.text()
+            mime_data.setText(item.full_text if isinstance(item, ElidedListWidgetItem) else item.text())
             drag = QDrag(self)
             drag.setMimeData(mime_data)
             drag.exec_(Qt.CopyAction)
+
 
     def show_context_menu(self, position):
         item = self.itemAt(position)
         if item:
             menu = QMenu(self)
             disconnect_action = QAction("Disconnect", self)
-            disconnect_action.triggered.connect(lambda checked, name=item.full_text: self.window().disconnect_node(name))
+            # Use item.full_text if it's an ElidedListWidgetItem, otherwise use item.text()
+            disconnect_action.triggered.connect(lambda checked, name=(item.full_text if isinstance(item, ElidedListWidgetItem) else item.text()): self.window().disconnect_node(name))
             menu.addAction(disconnect_action)
             menu.exec_(self.mapToGlobal(position))
 
@@ -102,16 +105,19 @@ class DropListWidget(QListWidget):
             output_name = event.mimeData().text()
             input_item = self.itemAt(event.pos())
             if input_item:
-                input_name = input_item.full_text
+                # Use full_text for ElidedListWidgetItem, else text()
+                input_name = input_item.full_text if isinstance(input_item, ElidedListWidgetItem) else input_item.text()
                 self.window().make_connection(output_name, input_name)
         event.acceptProposedAction()
+
 
     def show_context_menu(self, position):
         item = self.itemAt(position)
         if item:
             menu = QMenu(self)
             disconnect_action = QAction("Disconnect", self)
-            disconnect_action.triggered.connect(lambda checked, name=item.full_text: self.window().disconnect_node(name))
+            # Use item.full_text if it's an ElidedListWidgetItem, otherwise use item.text()
+            disconnect_action.triggered.connect(lambda checked, name=(item.full_text if isinstance(item, ElidedListWidgetItem) else item.text()): self.window().disconnect_node(name))
             menu.addAction(disconnect_action)
             menu.exec_(self.mapToGlobal(position))
 
@@ -174,7 +180,7 @@ class JackConnectionManager(QMainWindow):
         super().__init__()
         self.setWindowTitle('Cables')
         self.setGeometry(100, 100, 1200, 705)
-        self.initial_middle_width = 250  #  Store the initial width of the middle section
+        self.initial_middle_width = 350  #  Store the initial width of the middle section
 
         self.client = jack.Client('ConnectionManager')
         self.connections = set()
