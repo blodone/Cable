@@ -2,9 +2,10 @@ import sys
 import random
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
-                             QGraphicsView, QGraphicsScene, QGraphicsLineItem, QListWidgetItem,
-                             QGraphicsPathItem, QCheckBox, QMenu, QAction, QSizePolicy, QSpacerItem)
-from PyQt5.QtCore import Qt, QMimeData, QLineF, QPointF, QRectF, QTimer, QSize, QRect
+                             QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
+                             QGraphicsPathItem, QCheckBox, QMenu, QAction, QSizePolicy, QSpacerItem,
+                             QButtonGroup)
+from PyQt5.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect
 from PyQt5.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
                          QPainterPath, QFontMetrics, QFont)
 import jack
@@ -198,7 +199,7 @@ class JackConnectionManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Cables')
-        self.setGeometry(100, 100, 1200, 705)
+        self.setGeometry(100, 100, 1250, 705)
         self.initial_middle_width = 250
 
         self.client = jack.Client('ConnectionManager')
@@ -207,77 +208,42 @@ class JackConnectionManager(QMainWindow):
         self.connection_history = ConnectionHistory()
         self.dark_mode = self.is_dark_mode()
         self.setup_colors()
+        self.port_type = 'audio'  # Initial port type
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        layout = QVBoxLayout(main_widget)
+        main_layout = QVBoxLayout(main_widget)
 
-        input_layout = QVBoxLayout()
-        output_layout = QVBoxLayout()
+        # --- Tabs ---
+        self.tab_widget = QTabWidget()
+        main_layout.addWidget(self.tab_widget)
 
-        input_label = QLabel(' Input Ports')
-        font = QFont()
-        font.setBold(True)
-        input_label.setFont(font)
-        input_label.setStyleSheet(f"color: {self.text_color.name()};")
-        self.input_list = DropListWidget()  # Use the modified DropListWidget
-        self.input_list.itemClicked.connect(self.on_input_clicked)
-        self.input_list.setStyleSheet(f"""
-            QListWidget {{ background-color: {self.background_color.name()}; color: {self.text_color.name()}; }}
-            QListWidget::item:selected {{ background-color: {self.highlight_color.name()}; color: {self.text_color.name()}; }}
-        """)
+        # Create the tab content widgets *before* adding them to the tabs
+        self.audio_tab_widget = QWidget()
+        self.midi_tab_widget = QWidget()
 
-        spacer = QSpacerItem(20, 34, QSizePolicy.Minimum, QSizePolicy.Fixed)
-        input_layout.addSpacerItem(spacer)
-
-        input_layout.addWidget(input_label)
-        input_layout.addWidget(self.input_list)
-
-        output_label = QLabel(' Output Ports')
-        output_label.setFont(font)
-        output_label.setStyleSheet(f"color: {self.text_color.name()};")
-
-        self.output_list = DragListWidget()  # Use the modified DragListWidget
-        self.output_list.itemClicked.connect(self.on_output_clicked)
-        self.output_list.setStyleSheet(f"""
-            QListWidget {{ background-color: {self.background_color.name()}; color: {self.text_color.name()}; }}
-            QListWidget::item:selected {{ background-color: {self.highlight_color.name()}; color: {self.text_color.name()}; }}
-        """)
-
-        spacer = QSpacerItem(20, 34, QSizePolicy.Minimum, QSizePolicy.Fixed)
-        output_layout.addSpacerItem(spacer)
-
-        output_layout.addWidget(output_label)
-        output_layout.addWidget(self.output_list)
-
-        middle_layout = QVBoxLayout()
-
-        button_layout = QHBoxLayout()
-        self.connect_button = QPushButton('Connect')
-        self.disconnect_button = QPushButton('Disconnect')
-        self.refresh_button = QPushButton('Refresh')
-        for button in [self.connect_button, self.disconnect_button, self.refresh_button]:
-            button.setStyleSheet(f"""
-                QPushButton {{ background-color: {self.button_color.name()}; color: {self.text_color.name()}; }}
-                QPushButton:hover {{ background-color: {self.highlight_color.name()}; }}
-            """)
-        button_layout.addWidget(self.connect_button)
-        button_layout.addWidget(self.disconnect_button)
-        button_layout.addWidget(self.refresh_button)
-
-        self.connection_scene = QGraphicsScene()
-        self.connection_view = ConnectionView(self.connection_scene)
-        self.connection_view.setStyleSheet(f"background: {self.background_color.name()}; border: none;")
-
-        middle_layout_widget = QWidget()
-        middle_layout_widget.setLayout(middle_layout)
-        middle_layout_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        middle_layout_widget.setFixedWidth(self.initial_middle_width)
+        self.setup_audio_tab()
+        self.setup_midi_tab()
 
 
-        middle_layout.addLayout(button_layout)
-        middle_layout.addWidget(self.connection_view)
+        self.tab_widget.addTab(self.audio_tab_widget, "Audio")
+        self.tab_widget.addTab(self.midi_tab_widget, "MIDI")
+        self.tab_widget.currentChanged.connect(self.switch_tab)
+        # --- End Tabs ---
 
+        # --- Common Bottom Layout (Undo/Redo, etc.) ---
+        bottom_layout = QHBoxLayout()
+        self.auto_refresh_checkbox = QCheckBox('Auto Refresh')
+        self.auto_refresh_checkbox.setChecked(True)
+        self.undo_button = QPushButton('Undo')
+        self.redo_button = QPushButton('Redo')
+
+        # Assuming connect_button exists (it will be created in setup_audio_tab)
+        # We need to defer this until after setup_audio_tab has run.
+        QTimer.singleShot(0, self.setup_bottom_layout)  # Defer to event loop
+
+    def setup_bottom_layout(self):
+        # This method is called *after* setup_audio_tab, so self.connect_button exists.
         bottom_layout = QHBoxLayout()
         self.auto_refresh_checkbox = QCheckBox('Auto Refresh')
         self.auto_refresh_checkbox.setChecked(True)
@@ -301,27 +267,191 @@ class JackConnectionManager(QMainWindow):
         bottom_layout.addWidget(self.redo_button)
         bottom_layout.addStretch()
 
+        # Add the bottom layout to the *main* layout, not inside a tab.
+        self.centralWidget().layout().addLayout(bottom_layout)
+
+
+        self.auto_refresh_checkbox.stateChanged.connect(self.toggle_auto_refresh)
+        self.undo_button.clicked.connect(self.undo_action)
+        self.redo_button.clicked.connect(self.redo_action)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.refresh_ports)
+        self.toggle_auto_refresh(Qt.Checked if self.auto_refresh_checkbox.isChecked() else Qt.Unchecked)
+        self.refresh_ports()
+        self.update_disconnect_button()
+
+    def setup_audio_tab(self):
+        layout = QVBoxLayout(self.audio_tab_widget)
+
+        input_layout = QVBoxLayout()
+        output_layout = QVBoxLayout()
+
+        input_label = QLabel(' Input Ports')
+        font = QFont()
+        font.setBold(True)
+        input_label.setFont(font)
+        input_label.setStyleSheet(f"color: {self.text_color.name()};")
+        self.input_list = DropListWidget()
+        self.input_list.itemClicked.connect(self.on_input_clicked)
+        self.input_list.setStyleSheet(f"""
+            QListWidget {{ background-color: {self.background_color.name()}; color: {self.text_color.name()}; }}
+            QListWidget::item:selected {{ background-color: {self.highlight_color.name()}; color: {self.text_color.name()}; }}
+        """)
+
+        spacer = QSpacerItem(20, 17, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        input_layout.addSpacerItem(spacer)
+
+        input_layout.addWidget(input_label)
+        input_layout.addWidget(self.input_list)
+
+        output_label = QLabel(' Output Ports')
+        output_label.setFont(font)
+        output_label.setStyleSheet(f"color: {self.text_color.name()};")
+
+        self.output_list = DragListWidget()
+        self.output_list.itemClicked.connect(self.on_output_clicked)
+        self.output_list.setStyleSheet(f"""
+            QListWidget {{ background-color: {self.background_color.name()}; color: {self.text_color.name()}; }}
+            QListWidget::item:selected {{ background-color: {self.highlight_color.name()}; color: {self.text_color.name()}; }}
+        """)
+
+        spacer = QSpacerItem(20, 17, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        output_layout.addSpacerItem(spacer)
+
+        output_layout.addWidget(output_label)
+        output_layout.addWidget(self.output_list)
+
+        middle_layout = QVBoxLayout()
+
+       # spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
+       # input_layout.addSpacerItem(spacer)
+
+        button_layout = QHBoxLayout()
+        self.connect_button = QPushButton('Connect')
+        self.disconnect_button = QPushButton('Disconnect')
+        self.refresh_button = QPushButton('Refresh')  # Keep this
+        for button in [self.connect_button, self.disconnect_button, self.refresh_button]:
+            button.setStyleSheet(f"""
+                QPushButton {{ background-color: {self.button_color.name()}; color: {self.text_color.name()}; }}
+                QPushButton:hover {{ background-color: {self.highlight_color.name()}; }}
+            """)
+        button_layout.addWidget(self.connect_button)
+        button_layout.addWidget(self.disconnect_button)
+        button_layout.addWidget(self.refresh_button)  # Add refresh button
+
+
+        self.connection_scene = QGraphicsScene()
+        self.connection_view = ConnectionView(self.connection_scene)
+        self.connection_view.setStyleSheet(f"background: {self.background_color.name()}; border: none;")
+
+        middle_layout_widget = QWidget()
+        middle_layout_widget.setLayout(middle_layout)
+        middle_layout_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        middle_layout_widget.setFixedWidth(self.initial_middle_width)
+
+
+        middle_layout.addLayout(button_layout)
+        middle_layout.addWidget(self.connection_view)
+
         content_layout = QHBoxLayout()
         content_layout.addLayout(output_layout)
         content_layout.addWidget(middle_layout_widget)
         content_layout.addLayout(input_layout)
 
         layout.addLayout(content_layout)
-        layout.addLayout(bottom_layout)
 
+        # Connect signals for buttons
         self.connect_button.clicked.connect(self.make_connection_selected)
         self.disconnect_button.clicked.connect(self.break_connection_selected)
-        self.refresh_button.clicked.connect(self.refresh_ports)
-        self.auto_refresh_checkbox.stateChanged.connect(self.toggle_auto_refresh)
-        self.undo_button.clicked.connect(self.undo_action)
-        self.redo_button.clicked.connect(self.redo_action)
+        self.refresh_button.clicked.connect(self.refresh_ports) # Connect refresh button
 
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.refresh_ports)
-        self.toggle_auto_refresh(Qt.Checked if self.auto_refresh_checkbox.isChecked() else Qt.Unchecked)
+    def setup_midi_tab(self):
+        # VERY IMPORTANT:  We need DIFFERENT list widgets for MIDI.
+        # Otherwise, they share the same list, and you'll see the same ports in both.
+        layout = QVBoxLayout(self.midi_tab_widget)
 
+        input_layout = QVBoxLayout()
+        output_layout = QVBoxLayout()
+
+        input_label = QLabel(' MIDI Input Ports')  # Note: MIDI Input
+        font = QFont()
+        font.setBold(True)
+        input_label.setFont(font)
+        input_label.setStyleSheet(f"color: {self.text_color.name()};")
+
+        # Use DIFFERENT list widgets for MIDI
+        self.midi_input_list = DropListWidget()
+        self.midi_input_list.itemClicked.connect(self.on_midi_input_clicked)  # Different handler
+        self.midi_input_list.setStyleSheet(f"""
+            QListWidget {{ background-color: {self.background_color.name()}; color: {self.text_color.name()}; }}
+            QListWidget::item:selected {{ background-color: {self.highlight_color.name()}; color: {self.text_color.name()}; }}
+        """)
+
+        spacer = QSpacerItem(20, 34, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        input_layout.addSpacerItem(spacer)
+        input_layout.addWidget(input_label)
+        input_layout.addWidget(self.midi_input_list)
+
+        output_label = QLabel(' MIDI Output Ports')  # Note: MIDI Output
+        output_label.setFont(font)
+        output_label.setStyleSheet(f"color: {self.text_color.name()};")
+
+        self.midi_output_list = DragListWidget()
+        self.midi_output_list.itemClicked.connect(self.on_midi_output_clicked)  # Different handler
+        self.midi_output_list.setStyleSheet(f"""
+            QListWidget {{ background-color: {self.background_color.name()}; color: {self.text_color.name()}; }}
+            QListWidget::item:selected {{ background-color: {self.highlight_color.name()}; color: {self.text_color.name()}; }}
+        """)
+
+        spacer = QSpacerItem(20, 34, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        output_layout.addSpacerItem(spacer)
+        output_layout.addWidget(output_label)
+        output_layout.addWidget(self.midi_output_list)
+
+        middle_layout = QVBoxLayout()
+
+        button_layout = QHBoxLayout()
+        self.midi_connect_button = QPushButton('Connect')  # Different buttons for MIDI
+        self.midi_disconnect_button = QPushButton('Disconnect')
+        for button in [self.midi_connect_button, self.midi_disconnect_button]:
+            button.setStyleSheet(f"""
+                QPushButton {{ background-color: {self.button_color.name()}; color: {self.text_color.name()}; }}
+                QPushButton:hover {{ background-color: {self.highlight_color.name()}; }}
+            """)
+
+        button_layout.addWidget(self.midi_connect_button)
+        button_layout.addWidget(self.midi_disconnect_button)
+
+
+        self.midi_connection_scene = QGraphicsScene()  # DIFFERENT scene for MIDI
+        self.midi_connection_view = ConnectionView(self.midi_connection_scene)
+        self.midi_connection_view.setStyleSheet(f"background: {self.background_color.name()}; border: none;")
+
+        middle_layout_widget = QWidget()
+        middle_layout_widget.setLayout(middle_layout)
+        middle_layout_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        middle_layout_widget.setFixedWidth(self.initial_middle_width)
+
+        middle_layout.addLayout(button_layout)
+        middle_layout.addWidget(self.midi_connection_view)
+
+        content_layout = QHBoxLayout()
+        content_layout.addLayout(output_layout)
+        content_layout.addWidget(middle_layout_widget)
+        content_layout.addLayout(input_layout)
+        layout.addLayout(content_layout)
+
+
+        self.midi_connect_button.clicked.connect(self.make_midi_connection_selected)
+        self.midi_disconnect_button.clicked.connect(self.break_midi_connection_selected)
+
+    def switch_tab(self, index):
+        if index == 0:  # Audio tab
+            self.port_type = 'audio'
+        elif index == 1:  # MIDI tab
+            self.port_type = 'midi'
         self.refresh_ports()
-        self.update_disconnect_button()
+
 
     def toggle_auto_refresh(self, state):
         if state == Qt.Checked:
@@ -350,6 +480,12 @@ class JackConnectionManager(QMainWindow):
             self.auto_highlight_color = QColor(255, 140, 0)
 
     def refresh_ports(self):
+        if self.port_type == 'audio':
+            self.refresh_audio_ports()
+        elif self.port_type == 'midi':
+            self.refresh_midi_ports()
+
+    def refresh_audio_ports(self):
         current_input_text = self.input_list.currentItem().text() if self.input_list.currentItem() else None
         current_output_text = self.output_list.currentItem().text() if self.output_list.currentItem() else None
 
@@ -360,10 +496,11 @@ class JackConnectionManager(QMainWindow):
         output_ports = []
 
         for port in self.client.get_ports():
-            if port.is_input:
-                input_ports.append(port.name)
-            elif port.is_output:
-                output_ports.append(port.name)
+            if not port.is_midi:
+                if port.is_input:
+                    input_ports.append(port.name)
+                elif port.is_output:
+                    output_ports.append(port.name)
 
         input_ports.sort(key=str.casefold)
         output_ports.sort(key=str.casefold)
@@ -390,15 +527,85 @@ class JackConnectionManager(QMainWindow):
 
         if current_input_text:
             for output_port in self.client.get_ports(is_output=True):
-                if current_input_text in [conn.name for conn in self.client.get_all_connections(output_port)]:
-                    self.highlight_output(output_port.name, auto_highlight=True)
+                if self.is_matching_port_type(output_port):
+                    if current_input_text in [conn.name for conn in self.client.get_all_connections(output_port)]:
+                        self.highlight_output(output_port.name, auto_highlight=True)
         if current_output_text:
-            for input_port in self.client.get_all_connections(current_output_text):
-                self.highlight_input(input_port.name, auto_highlight=True)
+            for input_port in [p for p in self.client.get_ports(is_input=True) if current_output_text in [c.name for c in self.client.get_all_connections(p)]]:
+                if self.is_matching_port_type(input_port):
+                    self.highlight_input(input_port.name, auto_highlight=True)
+
 
         self.update_disconnect_button()
 
+    def refresh_midi_ports(self):
+        current_input_text = self.midi_input_list.currentItem().text() if self.midi_input_list.currentItem() else None
+        current_output_text = self.midi_output_list.currentItem().text() if self.midi_output_list.currentItem() else None
 
+        self.midi_input_list.clear()
+        self.midi_output_list.clear()
+
+        input_ports = []
+        output_ports = []
+
+        for port in self.client.get_ports():
+            if port.is_midi:
+                if port.is_input:
+                    input_ports.append(port.name)
+                elif port.is_output:
+                    output_ports.append(port.name)
+
+        input_ports.sort(key=str.casefold)
+        output_ports.sort(key=str.casefold)
+
+        for input_port in input_ports:
+            self.midi_input_list.addItem(input_port)  # Use midi_input_list
+
+        for output_port in output_ports:
+            self.midi_output_list.addItem(output_port)  # Use midi_output_list
+
+        if current_input_text:
+            for i in range(self.midi_input_list.count()):
+                if self.midi_input_list.item(i).text() == current_input_text:
+                    self.midi_input_list.setCurrentRow(i)
+                    break
+
+        if current_output_text:
+            for i in range(self.midi_output_list.count()):
+                if self.midi_output_list.item(i).text() == current_output_text:
+                    self.midi_output_list.setCurrentRow(i)
+                    break
+
+        self.midi_input_list.update_elided_text()
+        self.midi_output_list.update_elided_text()
+        self.update_midi_connections()
+        self.clear_midi_highlights()
+
+        if current_input_text:
+            for output_port in self.client.get_ports(is_output=True):
+                if not self.is_matching_port_type(output_port):
+                    continue
+                if current_input_text in [c.name for c in self.client.get_all_connections(output_port)]:
+                    self.highlight_midi_output(output_port.name, auto_highlight=True)
+
+        if current_output_text:
+            for input_port in [p for p in self.client.get_ports(is_input=True) if
+                              current_output_text in [c.name for c in self.client.get_all_connections(p)]]:
+                if not self.is_matching_port_type(input_port):
+                    continue
+                self.highlight_midi_input(input_port.name, auto_highlight=True)
+
+
+        self.update_midi_disconnect_button()
+
+
+    def is_matching_port_type(self, port):
+        """Helper function to check if a port matches the current port type."""
+        if self.port_type == 'audio':
+            return not port.is_midi
+        elif self.port_type == 'midi':
+            return port.is_midi
+        return False
 
     def make_connection(self, output_name, input_name):
         try:
@@ -412,6 +619,30 @@ class JackConnectionManager(QMainWindow):
 
         self.update_disconnect_button()
 
+    def make_midi_connection(self, output_name, input_name):
+        try:
+            self.client.connect(output_name, input_name)
+            # Use a separate MIDI connection history, if needed
+            # self.midi_connection_history.add_action('connect', output_name, input_name)
+            self.update_undo_redo_buttons()  # Still use the main undo/redo for simplicity
+            self.update_midi_connections()
+            self.refresh_midi_ports()
+        except jack.JackError as e:
+            print(f"MIDI Connection error: {e}")
+
+        self.update_midi_disconnect_button()
+
+    def make_connection_selected(self):
+        input_item = self.input_list.currentItem()
+        output_item = self.output_list.currentItem()
+        if input_item and output_item:
+            self.make_connection(output_item.text(), input_item.text())
+
+    def make_midi_connection_selected(self):
+        input_item = self.midi_input_list.currentItem()
+        output_item = self.midi_output_list.currentItem()
+        if input_item and output_item:
+            self.make_midi_connection(output_item.text(), input_item.text())
 
     def break_connection(self, output_name, input_name):
         try:
@@ -424,7 +655,30 @@ class JackConnectionManager(QMainWindow):
             print(f"Disconnection error: {e}")
 
         self.update_disconnect_button()
+    def break_midi_connection(self, output_name, input_name):
+        try:
+            self.client.disconnect(output_name, input_name)
+            # Use a separate MIDI connection history, if needed
+            # self.midi_connection_history.add_action('disconnect', output_name, input_name)
+            self.update_undo_redo_buttons()  # Still use the main undo/redo
+            self.update_midi_connections()  # Update MIDI connections
+            self.refresh_midi_ports()
+        except jack.JackError as e:
+            print(f"MIDI Disconnection error: {e}")
+        self.update_midi_disconnect_button()
 
+
+    def break_connection_selected(self):
+        input_item = self.input_list.currentItem()
+        output_item = self.output_list.currentItem()
+        if input_item and output_item:
+            self.break_connection(output_item.text(), input_item.text())
+
+    def break_midi_connection_selected(self):
+        input_item = self.midi_input_list.currentItem()
+        output_item = self.midi_output_list.currentItem()
+        if input_item and output_item:
+            self.break_midi_connection(output_item.text(), input_item.text())
 
     def update_undo_redo_buttons(self):
         self.undo_button.setEnabled(self.connection_history.can_undo())
@@ -441,10 +695,11 @@ class JackConnectionManager(QMainWindow):
                     self.client.disconnect(output_name, input_name)
                 self.update_undo_redo_buttons()
                 self.update_connections()
-                self.refresh_ports()
+                self.refresh_ports()  # Refresh based on current tab
             except jack.JackError as e:
                 print(f"Undo error: {e}")
-            self.update_disconnect_button()
+            self.update_disconnect_button()  # Update based on current tab
+            self.update_midi_disconnect_button()
 
 
     def redo_action(self):
@@ -455,14 +710,14 @@ class JackConnectionManager(QMainWindow):
                 if action_type == 'connect':
                     self.client.connect(output_name, input_name)
                 else:
-                    self.client.disconnect(output_name, input_name)
+                        self.client.disconnect(output_name, input_name)
                 self.update_undo_redo_buttons()
                 self.update_connections()
-                self.refresh_ports()
+                self.refresh_ports()  # Refresh based on the current tab
             except jack.JackError as e:
                 print(f"Redo error: {e}")
-            self.update_disconnect_button()
-
+            self.update_disconnect_button()  # Update for current tab
+            self.update_midi_disconnect_button()
 
     def disconnect_node(self, node_name):
         if node_name in [port.name for port in self.client.get_ports(is_input=True)]:
@@ -473,33 +728,25 @@ class JackConnectionManager(QMainWindow):
             for input_port in self.client.get_all_connections(node_name):
                 self.break_connection(node_name, input_port.name)
 
-    def make_connection_selected(self):
-        input_item = self.input_list.currentItem()
-        output_item = self.output_list.currentItem()
-        if input_item and output_item:
-            self.make_connection(output_item.text(), input_item.text())
-
-    def break_connection_selected(self):
-        input_item = self.input_list.currentItem()
-        output_item = self.output_list.currentItem()
-        if input_item and output_item:
-            self.break_connection(output_item.text(), input_item.text())
-
     def get_port_position(self, list_widget, port_name):
         for i in range(list_widget.count()):
             item = list_widget.item(i)
             if item.text() == port_name or (isinstance(item, ElidedListWidgetItem) and item.full_text == port_name):
                 rect = list_widget.visualItemRect(item)
-                if list_widget == self.output_list:
+                if list_widget == self.output_list or list_widget == self.midi_output_list:
                     point = QPointF(list_widget.viewport().width(), rect.top() + rect.height() / 2)
                 else:
                     point = rect.topLeft() + QPointF(0, rect.height() / 2)
 
                 viewport_point = list_widget.viewport().mapToParent(point.toPoint())
                 global_point = list_widget.mapToGlobal(viewport_point)
-                scene_point = self.connection_view.mapFromGlobal(global_point)
-                return self.connection_view.mapToScene(scene_point)
 
+                if list_widget in (self.output_list, self.input_list):
+                  scene_point = self.connection_view.mapFromGlobal(global_point)
+                  return self.connection_view.mapToScene(scene_point)
+                elif list_widget in (self.midi_output_list, self.midi_input_list):
+                  scene_point = self.midi_connection_view.mapFromGlobal(global_point)
+                  return self.midi_connection_view.mapToScene(scene_point)
         return None
 
     def get_random_color(self, base_name):
@@ -514,7 +761,11 @@ class JackConnectionManager(QMainWindow):
 
         connections = []
         for output_port in self.client.get_ports(is_output=True):
+            if not self.is_matching_port_type(output_port) or output_port.is_midi:  # Only audio
+                continue
             for input_port in self.client.get_all_connections(output_port):
+                if not self.is_matching_port_type(input_port) or input_port.is_midi: # Only audio
+                      continue
                 connections.append((output_port.name, input_port.name))
 
         for output_name, input_name in connections:
@@ -539,6 +790,43 @@ class JackConnectionManager(QMainWindow):
 
         self.connection_view.fitInView(self.connection_scene.sceneRect(), Qt.KeepAspectRatio)
 
+    def update_midi_connections(self):
+        self.midi_connection_scene.clear()
+        view_rect = self.midi_connection_view.rect()
+        scene_rect = QRectF(0, 0, view_rect.width(), view_rect.height())
+        self.midi_connection_scene.setSceneRect(scene_rect)
+
+        connections = []
+        for output_port in self.client.get_ports(is_output=True):
+            if not self.is_matching_port_type(output_port) or not output_port.is_midi: # Only MIDI
+                continue
+            for input_port in self.client.get_all_connections(output_port):
+                if  not self.is_matching_port_type(input_port) or not input_port.is_midi:  # Only MIDI
+                    continue
+                connections.append((output_port.name, input_port.name))
+
+        for output_name, input_name in connections:
+            start_pos = self.get_port_position(self.midi_output_list, output_name) # Use MIDI lists
+            end_pos = self.get_port_position(self.midi_input_list, input_name)     # Use MIDI lists
+            if start_pos and end_pos:
+                path = QPainterPath()
+                path.moveTo(start_pos)
+                ctrl1_x = start_pos.x() + (end_pos.x() - start_pos.x()) / 3
+                ctrl2_x = start_pos.x() + 2 * (end_pos.x() - start_pos.x()) / 3
+                path.cubicTo(
+                    QPointF(ctrl1_x, start_pos.y()),
+                    QPointF(ctrl2_x, end_pos.y()),
+                    end_pos
+                )
+                base_name = output_name.rsplit(':', 1)[0]
+                color = self.get_random_color(base_name)
+                pen = QPen(color, 2)
+                path_item = QGraphicsPathItem(path)
+                path_item.setPen(pen)
+                self.midi_connection_scene.addItem(path_item)  # Add to MIDI scene
+
+        self.midi_connection_view.fitInView(self.midi_connection_scene.sceneRect(), Qt.KeepAspectRatio)
+
     def on_input_clicked(self, item):
         self.clear_highlights()
         self.input_list.setCurrentItem(item)
@@ -547,11 +835,26 @@ class JackConnectionManager(QMainWindow):
         self.highlight_input(input_name)
 
         for output_port in self.client.get_ports(is_output=True):
+            if not self.is_matching_port_type(output_port) or output_port.is_midi:
+                continue  # Skip ports that don't match current type
             if input_name in [conn.name for conn in self.client.get_all_connections(output_port)]:
                 self.highlight_output(output_port.name, auto_highlight=True)
-
         self.update_disconnect_button()
 
+    def on_midi_input_clicked(self, item):
+        self.clear_midi_highlights()
+        self.midi_input_list.setCurrentItem(item)
+        input_name = item.text()
+
+        self.highlight_midi_input(input_name)
+
+        for output_port in self.client.get_ports(is_output=True):
+            if not self.is_matching_port_type(output_port) or not output_port.is_midi:  # Only MIDI
+                continue
+            if input_name in [conn.name for conn in self.client.get_all_connections(output_port)]:
+                self.highlight_midi_output(output_port.name, auto_highlight=True)
+
+        self.update_midi_disconnect_button()
 
     def on_output_clicked(self, item):
         self.clear_highlights()
@@ -560,11 +863,26 @@ class JackConnectionManager(QMainWindow):
 
         self.highlight_output(output_name)
 
-        for input_port in self.client.get_all_connections(output_name):
+        for input_port in [p for p in self.client.get_ports(is_input=True) if output_name in [c.name for c in self.client.get_all_connections(p)]]:
+            if not self.is_matching_port_type(input_port) or input_port.is_midi:
+                continue # Skip ports that don't match
             self.highlight_input(input_port.name, auto_highlight=True)
 
         self.update_disconnect_button()
 
+    def on_midi_output_clicked(self, item):
+        self.clear_midi_highlights()
+        self.midi_output_list.setCurrentItem(item)
+        output_name = item.text()
+
+        self.highlight_midi_output(output_name)
+
+        for input_port in [p for p in self.client.get_ports(is_input=True) if
+                          output_name in [c.name for c in self.client.get_all_connections(p)]]:
+            if not self.is_matching_port_type(input_port) or not input_port.is_midi:  # Only MIDI
+                continue
+            self.highlight_midi_input(input_port.name, auto_highlight=True)
+        self.update_midi_disconnect_button()
 
     def highlight_input(self, input_name, auto_highlight=False):
         for i in range(self.input_list.count()):
@@ -580,17 +898,41 @@ class JackConnectionManager(QMainWindow):
                 item.setBackground(QBrush(self.highlight_color if not auto_highlight else self.auto_highlight_color))
                 break
 
+    def highlight_midi_input(self, input_name, auto_highlight=False):
+        for i in range(self.midi_input_list.count()):
+            item = self.midi_input_list.item(i)
+            if (isinstance(item, ElidedListWidgetItem) and item.full_text == input_name) or item.text() == input_name:
+                item.setBackground(QBrush(self.highlight_color if not auto_highlight else self.auto_highlight_color))
+                break
+
+    def highlight_midi_output(self, output_name, auto_highlight=False):
+        for i in range(self.midi_output_list.count()):
+            item = self.midi_output_list.item(i)
+            if (isinstance(item, ElidedListWidgetItem) and item.full_text == output_name) or item.text() == output_name:
+                item.setBackground(QBrush(self.highlight_color if not auto_highlight else self.auto_highlight_color))
+                break
+
     def clear_highlights(self):
         for i in range(self.input_list.count()):
             self.input_list.item(i).setBackground(QBrush(self.background_color))
         for i in range(self.output_list.count()):
             self.output_list.item(i).setBackground(QBrush(self.background_color))
 
+    def clear_midi_highlights(self):
+        for i in range(self.midi_input_list.count()):
+            self.midi_input_list.item(i).setBackground(QBrush(self.background_color))
+        for i in range(self.midi_output_list.count()):
+            self.midi_output_list.item(i).setBackground(QBrush(self.background_color))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_connections()
+        self.update_midi_connections()
         self.input_list.update_elided_text()
         self.output_list.update_elided_text()
+        self.midi_input_list.update_elided_text()
+        self.midi_output_list.update_elided_text()
+
 
     def update_disconnect_button(self):
         input_item = self.input_list.currentItem()
@@ -607,6 +949,22 @@ class JackConnectionManager(QMainWindow):
             self.disconnect_button.setEnabled(connected)
         else:
             self.disconnect_button.setEnabled(False)
+
+    def update_midi_disconnect_button(self):
+        input_item = self.midi_input_list.currentItem()
+        output_item = self.midi_output_list.currentItem()
+
+        if input_item and output_item:
+            output_name = output_item.text()
+            input_name = input_item.text()
+            connected = False
+            for input_port in self.client.get_all_connections(output_name):
+                if input_port.name == input_name:
+                    connected = True
+                    break
+            self.midi_disconnect_button.setEnabled(connected)  # Use MIDI button
+        else:
+            self.midi_disconnect_button.setEnabled(False)
 
 
 def main():
