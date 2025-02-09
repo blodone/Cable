@@ -20,6 +20,7 @@ class PipeWireSettingsApp(QWidget):
         self.tray_icon = None
         self.tray_enabled = False
         self.connection_manager_process = None
+        self.tray_click_opens_cables = True #Change to 'False' to open Cable (main app) from tray icon rather than Cable (connections manager)
 
     def create_section_group(self, title, layout):
         group = QGroupBox()
@@ -260,8 +261,8 @@ class PipeWireSettingsApp(QWidget):
             tray_menu.addAction(quit_action)
 
             # Connect the actions
-            show_action.triggered.connect(self.show)
-            cables_action.triggered.connect(self.open_cables)
+            show_action.triggered.connect(self.handle_show_action) # Use new handler function
+            cables_action.triggered.connect(self.handle_cables_action) # Use new handler for Cables menu
             quit_action.triggered.connect(self.quit_app)
 
             # Set the menu for the tray icon
@@ -273,32 +274,42 @@ class PipeWireSettingsApp(QWidget):
         # Show the tray icon
         self.tray_icon.show()
 
-    def open_cables(self):
-        # Search for connection-manager.py in possible locations
-        possible_locations = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "connection-manager.py"),
-            "/usr/share/cable/connection-manager.py"
-        ]
+    def handle_show_action(self): # New handler function
+        if not self.isVisible():
+            self.showNormal()
+            self.activateWindow()
 
-        cables_script = next((path for path in possible_locations if os.path.exists(path)), None)
+    def handle_cables_action(self): # New handler for Cables menu
+        if self.connection_manager_process is None or self.connection_manager_process.poll() is not None:
+            # If Cables app is not running, launch it
+            self.launch_connection_manager()
+        # else: Cables app is already running, do nothing
 
-        if cables_script:
-            try:
-                subprocess.Popen(["python3", cables_script])
-            except subprocess.CalledProcessError as e:
-                QMessageBox.critical(self, "Error", f"Error opening Cables: {e}")
-        else:
-            QMessageBox.critical(self, "Error", "Could not find connection-manager.py")
 
+    def open_cables(self): # open_cables is now only used by the button in main app
+        if self.connection_manager_process is None or self.connection_manager_process.poll() is not None:
+            # If Cables app is not running, launch it
+            self.launch_connection_manager()
+        # else: Cables app is already running, do nothing
 
 
     def tray_icon_activated(self, reason):
      if reason == QSystemTrayIcon.Trigger:  # Left click
-        if self.isMinimized() or not self.isVisible():
-            self.showNormal()  # Restore window if minimized
-            self.activateWindow()  # Bring window to the front
+        if self.tray_click_opens_cables: # Check the toggle
+            if self.connection_manager_process is None or self.connection_manager_process.poll() is not None:
+                # If Cables app is not running, launch it
+                self.launch_connection_manager()
+            else:
+                # Cables app is running, terminate it
+                self.connection_manager_process.terminate()
+                self.connection_manager_process.wait() # Wait for termination
+                self.connection_manager_process = None # Reset the process tracker
         else:
-            self.hide()  # Minimize to tray
+            if self.isMinimized() or not self.isVisible():
+                self.showNormal()  # Restore window if minimized
+                self.activateWindow()  # Bring window to the front
+            else:
+                self.hide()  # Minimize to tray
 
 
     def launch_connection_manager(self):
