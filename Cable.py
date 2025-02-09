@@ -20,7 +20,7 @@ class PipeWireSettingsApp(QWidget):
         self.tray_icon = None
         self.tray_enabled = False
         self.connection_manager_process = None
-        self.tray_click_opens_cables = True #Change to 'False' to open Cable (main app) from tray icon rather than Cable (connections manager)
+        self.tray_click_opens_cables = True #Change to 'False' to open Cable (main app) from tray icon rather than Cables (connections manager)
 
     def create_section_group(self, title, layout):
         group = QGroupBox()

@@ -1,5 +1,6 @@
 import sys
 import random
+import re
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
@@ -28,6 +29,7 @@ class PortListWidget(QListWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMinimumWidth(100)
         self._width = 150
+        self.current_drag_highlight_item = None
 
     def sizeHint(self):
         return QSize(self._width, self.sizeHintForRow(0) * self.count() + 2)
@@ -43,7 +45,7 @@ class PortListWidget(QListWidget):
         item = self.itemAt(position)
         if item:
             menu = QMenu(self)
-            disconnect_action = QAction("Disconnect", self)
+            disconnect_action = QAction("Disconnect all", self)
             disconnect_action.triggered.connect(lambda checked, name=(item.full_text if isinstance(item, ElidedListWidgetItem) else item.text()): self.window().disconnect_node(name))
             menu.addAction(disconnect_action)
             menu.exec_(self.mapToGlobal(position))
@@ -58,6 +60,16 @@ class PortListWidget(QListWidget):
             if isinstance(item, ElidedListWidgetItem):
                 item.setText(item.elide_text(item.full_text, self.viewport().width() - 10))
 
+    def dragLeaveEvent(self, event):
+        self.window().clear_drop_target_highlight(self)
+        self.current_drag_highlight_item = None
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self.window().clear_drop_target_highlight(self)
+        self.current_drag_highlight_item = None
+        super().dropEvent(event)
+
 
 class DragListWidget(PortListWidget): # Output List
     def __init__(self, parent=None):
@@ -65,6 +77,7 @@ class DragListWidget(PortListWidget): # Output List
         self.setDragEnabled(True)
         self.setAcceptDrops(True) # Accept drops
         self.setDragDropMode(QListWidget.DragDrop)
+
 
     def startDrag(self, supportedActions):
         item = self.currentItem()
@@ -79,6 +92,18 @@ class DragListWidget(PortListWidget): # Output List
         if event.mimeData().hasText():
             event.acceptProposedAction()
 
+    def dragMoveEvent(self, event):
+        item = self.itemAt(event.pos())
+        if item and item != self.current_drag_highlight_item:
+            self.window().clear_drop_target_highlight(self)
+            self.window().highlight_drop_target_item(self, item)
+            self.current_drag_highlight_item = item
+        elif not item:
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
+        super().dragMoveEvent(event)
+
+
     def dropEvent(self, event):  # Handle drops *onto* the output list
         source = event.source()
         if isinstance(source, DropListWidget):  # Dropped from input to output
@@ -88,6 +113,7 @@ class DragListWidget(PortListWidget): # Output List
                 output_name = output_item.full_text if isinstance(output_item, ElidedListWidgetItem) else output_item.text() # Get output name
                 self.window().make_connection(output_name, input_name)  # Correct order: output -> input
             event.acceptProposedAction()
+        super().dropEvent(event)
 
 
 class DropListWidget(PortListWidget): # Input List
@@ -111,6 +137,18 @@ class DropListWidget(PortListWidget): # Input List
             drag.setMimeData(mime_data)
             drag.exec_(Qt.CopyAction)
 
+    def dragMoveEvent(self, event):
+        item = self.itemAt(event.pos())
+        if item and item != self.current_drag_highlight_item:
+            self.window().clear_drop_target_highlight(self)
+            self.window().highlight_drop_target_item(self, item)
+            self.current_drag_highlight_item = item
+        elif not item:
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
+        super().dragMoveEvent(event)
+
+
     def dropEvent(self, event):  # Handle drops *onto* the input list (from output list)
         source = event.source()
         if isinstance(source, DragListWidget):   # Ensure the source is the output list
@@ -122,6 +160,7 @@ class DropListWidget(PortListWidget): # Input List
             event.acceptProposedAction()
         else:
             event.ignore() # If the source is not DragListWidget, ignore the drop
+        super().dropEvent(event)
 
 
 class ConnectionView(QGraphicsView):
@@ -340,6 +379,7 @@ class JackConnectionManager(QMainWindow):
             self.button_color = QColor(68, 68, 68)
             self.connection_color = QColor(0, 150, 255)
             self.auto_highlight_color = QColor(255, 165, 0)
+            self.drag_highlight_color = QColor(100, 100, 100) # New color for drag highlight
         else:
             self.background_color = QColor(255, 255, 255)
             self.text_color = QColor(0, 0, 0)
@@ -347,6 +387,8 @@ class JackConnectionManager(QMainWindow):
             self.button_color = QColor(240, 240, 240)
             self.connection_color = QColor(0, 100, 200)
             self.auto_highlight_color = QColor(255, 140, 0)
+            self.drag_highlight_color = QColor(200, 200, 200) # New color for drag highlight
+
 
     def list_stylesheet(self):
         return f"""
@@ -420,6 +462,20 @@ class JackConnectionManager(QMainWindow):
                 list_widget.setCurrentRow(i)
                 break
 
+    def _sort_ports(self, port_names):
+        def get_sort_key(port_name):
+            parts = re.split(r'(\d+)', port_name)
+            key = []
+            for part in parts:
+                if part.isdigit():
+                    key.append(int(part))
+                else:
+                    key.append(part.lower())
+            return key
+
+        return sorted(port_names, key=get_sort_key)
+
+
     def _get_ports(self, is_midi):
         input_ports = []
         output_ports = []
@@ -429,8 +485,9 @@ class JackConnectionManager(QMainWindow):
                     input_ports.append(port.name)
                 elif port.is_output:
                     output_ports.append(port.name)
-        input_ports.sort(key=str.casefold)
-        output_ports.sort(key=str.casefold)
+
+        input_ports = self._sort_ports(input_ports) # Apply custom sort
+        output_ports = self._sort_ports(output_ports) # Apply custom sort
         return input_ports, output_ports
 
     def _highlight_connected_ports(self, current_input_text, current_output_text, is_midi):
@@ -713,6 +770,14 @@ class JackConnectionManager(QMainWindow):
 
     def highlight_midi_output(self, output_name, auto_highlight=False):
         self._highlight_list_item(self.midi_output_list, output_name, auto_highlight)
+
+    def highlight_drop_target_item(self, list_widget, item):
+        item.setBackground(QBrush(self.drag_highlight_color))
+
+    def clear_drop_target_highlight(self, list_widget):
+        for i in range(list_widget.count()):
+            item = list_widget.item(i)
+            item.setBackground(QBrush(self.background_color))
 
 
     def _highlight_list_item(self, list_widget, port_name, auto_highlight):
