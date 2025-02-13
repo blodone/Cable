@@ -209,6 +209,7 @@ class ConnectionHistory:
 class JackConnectionManager(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.minimize_on_close = True # Set minimize_on_close to True for CM window.
         self.setWindowTitle('Cables')
         self.setGeometry(100, 100, 1250, 705)
         self.initial_middle_width = 250
@@ -266,9 +267,8 @@ class JackConnectionManager(QMainWindow):
         output_list.setStyleSheet(self.list_stylesheet())
         connection_view.setStyleSheet(f"background: {self.background_color.name()}; border: none;")
 
-        spacer = QSpacerItem(20, 17, QSizePolicy.Minimum, QSizePolicy.Fixed)
-        input_layout.addSpacerItem(spacer)
-        output_layout.addSpacerItem(spacer)
+        input_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Minimum, QSizePolicy.Fixed))
+        output_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Minimum, QSizePolicy.Fixed))
 
         input_layout.addWidget(input_label)
         input_layout.addWidget(input_list)
@@ -832,6 +832,13 @@ class JackConnectionManager(QMainWindow):
         else:
             disconnect_button.setEnabled(False)
             connect_button.setEnabled(False) # Disable connect if no items selected
+
+    def closeEvent(self, event):
+        if self.minimize_on_close:
+            event.ignore()
+            self.hide() # Minimize to tray instead of closing
+        else:
+            event.accept()
 
 
 def main():

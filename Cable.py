@@ -280,14 +280,14 @@ class PipeWireSettingsApp(QWidget):
             self.activateWindow()
 
     def handle_cables_action(self): # New handler for Cables menu
-        if self.connection_manager_process is None or self.connection_manager_process.poll() is not None:
+        if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
             # If Cables app is not running, launch it
             self.launch_connection_manager()
         # else: Cables app is already running, do nothing
 
 
     def open_cables(self): # open_cables is now only used by the button in main app
-        if self.connection_manager_process is None or self.connection_manager_process.poll() is not None:
+        if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
             # If Cables app is not running, launch it
             self.launch_connection_manager()
         # else: Cables app is already running, do nothing
@@ -296,14 +296,15 @@ class PipeWireSettingsApp(QWidget):
     def tray_icon_activated(self, reason):
      if reason == QSystemTrayIcon.Trigger:  # Left click
         if self.tray_click_opens_cables: # Check the toggle
-            if self.connection_manager_process is None or self.connection_manager_process.poll() is not None:
+            if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
                 # If Cables app is not running, launch it
                 self.launch_connection_manager()
             else:
-                # Cables app is running, terminate it
-                self.connection_manager_process.terminate()
-                self.connection_manager_process.wait() # Wait for termination
-                self.connection_manager_process = None # Reset the process tracker
+                if self.connection_manager_process.isMinimized() or not self.connection_manager_process.isVisible():
+                    self.connection_manager_process.showNormal()
+                    self.connection_manager_process.activateWindow()
+                else:
+                    self.connection_manager_process.hide()
         else:
             if self.isMinimized() or not self.isVisible():
                 self.showNormal()  # Restore window if minimized
@@ -313,35 +314,43 @@ class PipeWireSettingsApp(QWidget):
 
 
     def launch_connection_manager(self):
-    # Define possible locations for connection-manager.py
-        possible_paths = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "connection-manager.py"),  # Same directory as cable.py
-        "/usr/share/cable/connection-manager.py"  ]
-
-        connection_manager_path = None
-
-        # Check each possible path
-        for path in possible_paths:
-            if os.path.exists(path):
-                connection_manager_path = path
-                break
-
-        if connection_manager_path is None:
-            print("Error: connection-manager.py not found in any of the expected locations.")
-            return
-
         try:
-            # Store the process object in self.connection_manager_process
-            self.connection_manager_process = subprocess.Popen([sys.executable, connection_manager_path])
+            # Import the connection manager module
+            import importlib.util
+            import os
+
+            # Define possible paths
+            possible_paths = [
+                os.path.join(sys._MEIPASS, 'connection-manager.py') if getattr(sys, 'frozen', False) else None,  # PyInstaller bundle path
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'connection-manager.py'),  # Same directory
+                '/usr/share/cable/connection-manager.py'  # System installation path
+            ]
+
+            # Find first existing path
+            module_path = next((path for path in possible_paths if path and os.path.exists(path)), None)
+
+            if not module_path:
+                raise FileNotFoundError("Could not find connection-manager.py in any of the expected locations")
+
+            spec = importlib.util.spec_from_file_location("connection_manager", module_path)
+            connection_manager = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(connection_manager)
+
+            # Create and show the connection manager window
+            if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
+                self.connection_manager_process = connection_manager.JackConnectionManager()
+                self.connection_manager_process.show()
+            else:
+                self.connection_manager_process.activateWindow()
+
         except Exception as e:
             print(f"Error launching connection manager: {e}")
 
 
     def closeEvent(self, event):
         # Override the closeEvent to terminate the connection-manager process
-        if self.connection_manager_process:
-            self.connection_manager_process.terminate()  # Terminate the process
-            self.connection_manager_process.wait()  # Wait for the process to terminate
+      #  if self.connection_manager_process and self.connection_manager_process.isVisible(): # Check if process exists and window is visible
+       #     self.connection_manager_process.close()  # Close the connection manager window
 
         # Handle the tray icon and other close events as before
         if self.tray_enabled and self.tray_icon:
@@ -351,7 +360,7 @@ class PipeWireSettingsApp(QWidget):
                 "Cable",
                 "Application was minimized to the system tray",
                 QSystemTrayIcon.Information,
-                2000
+                1500
             )
         else:
             event.accept()
@@ -689,33 +698,16 @@ class PipeWireSettingsApp(QWidget):
             self.latency_display_value.setText("N/A")
 
 def main():
-    # Create a file lock
-    lock_file = '/tmp/pipewire_settings_app.lock'
+    app = QApplication(sys.argv)
+    ex = PipeWireSettingsApp()
+    ex.show()
 
-    try:
-        # Try to acquire the lock
-        lock_handle = open(lock_file, 'w')
-        fcntl.lockf(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # Run the application
+    exit_code = app.exec_()
 
-        # If we got here, no other instance is running
-        app = QApplication(sys.argv)
-        ex = PipeWireSettingsApp()
-        ex.show()
+    sys.exit(exit_code)
 
-        # Run the application
-        exit_code = app.exec_()
 
-        # Release the lock
-        fcntl.lockf(lock_handle, fcntl.LOCK_UN)
-        lock_handle.close()
-        os.unlink(lock_file)
-
-        sys.exit(exit_code)
-
-    except IOError:
-        # Another instance is already running
-        print("Another instance of PipeWireSettingsApp is already running.")
-        sys.exit(1)
 
 if __name__ == '__main__':
     main()
