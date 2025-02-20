@@ -1,6 +1,8 @@
 import sys
 import random
 import re
+import configparser
+import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
@@ -10,6 +12,51 @@ from PyQt5.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect
 from PyQt5.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
                          QPainterPath, QFontMetrics, QFont)
 import jack
+
+class ConfigManager:
+    def __init__(self):
+        self.config = configparser.ConfigParser()
+        self.config_dir = os.path.expanduser('~/.config/cable')
+        self.config_file = os.path.join(self.config_dir, 'config.ini')
+        self.load_config()
+
+    def load_config(self):
+        # Create directory if it doesn't exist
+        if not os.path.exists(self.config_dir):
+            os.makedirs(self.config_dir)
+
+        # Load existing config or create with defaults
+        if os.path.exists(self.config_file):
+            self.config.read(self.config_file)
+
+        # Ensure DEFAULT section exists
+        if 'DEFAULT' not in self.config:
+            self.config['DEFAULT'] = {}
+
+        # Set defaults if not present
+        defaults = {
+            'tray_enabled': 'True',
+            'tray_click_opens_cables': 'True',
+            'auto_refresh_enabled': 'True'  # Add default for auto refresh
+        }
+
+        for key, value in defaults.items():
+            if key not in self.config['DEFAULT']:
+                self.config['DEFAULT'][key] = value
+
+        self.save_config()
+
+    def save_config(self):
+        with open(self.config_file, 'w') as configfile:
+            self.config.write(configfile)
+
+    def get_bool(self, key, default=True):
+        return self.config['DEFAULT'].getboolean(key, default)
+
+    def set_bool(self, key, value):
+        self.config['DEFAULT'][key] = str(value)
+        self.save_config()
+
 
 class ElidedListWidgetItem(QListWidgetItem):
     def __init__(self, text, parent=None):
@@ -209,7 +256,8 @@ class ConnectionHistory:
 class JackConnectionManager(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.minimize_on_close = True # Set minimize_on_close to True for CM window.
+        self.config_manager = ConfigManager()
+        self.minimize_on_close = True
         self.setWindowTitle('Cables')
         self.setGeometry(100, 100, 1250, 705)
         self.initial_middle_width = 250
@@ -239,8 +287,30 @@ class JackConnectionManager(QMainWindow):
         self.tab_widget.currentChanged.connect(self.switch_tab)
 
         self.setup_bottom_layout(main_layout)
-        self.refresh_ports()
 
+        # Initialize the startup refresh timer
+        self.startup_refresh_timer = QTimer()
+        self.startup_refresh_timer.timeout.connect(self.startup_refresh)
+        self.startup_refresh_count = 0
+
+        # Initial refresh will happen after showing the window
+        QTimer.singleShot(10, self.start_startup_refresh)
+
+    def start_startup_refresh(self):
+        """Start the rapid refresh sequence on startup"""
+        self.startup_refresh_count = 0
+        self.startup_refresh_timer.start(10)  # 10ms interval
+
+    def startup_refresh(self):
+        """Handle the rapid refresh sequence"""
+        self.refresh_ports()
+        self.startup_refresh_count += 1
+
+        if self.startup_refresh_count >= 3:
+            self.startup_refresh_timer.stop()
+            # After quick refresh burst, start normal auto-refresh if enabled
+            if self.auto_refresh_checkbox.isChecked():
+                self.timer.start(1000)
 
     def setup_port_tab(self, tab_widget, tab_name, port_type):
         layout = QVBoxLayout(tab_widget)
@@ -332,11 +402,15 @@ class JackConnectionManager(QMainWindow):
     def setup_bottom_layout(self, main_layout):
         bottom_layout = QHBoxLayout()
         self.auto_refresh_checkbox = QCheckBox('Auto Refresh')
-        self.auto_refresh_checkbox.setChecked(True)
+
+        # Load auto refresh state from config
+        auto_refresh_enabled = self.config_manager.get_bool('auto_refresh_enabled', True)
+        self.auto_refresh_checkbox.setChecked(auto_refresh_enabled)
+
         self.undo_button = QPushButton('Undo')
         self.redo_button = QPushButton('Redo')
 
-        button_size = self.connect_button.sizeHint() # Assuming connect_button is already created
+        button_size = self.connect_button.sizeHint()
         self.undo_button.setFixedSize(button_size)
         self.redo_button.setFixedSize(button_size)
 
@@ -351,13 +425,13 @@ class JackConnectionManager(QMainWindow):
         bottom_layout.addStretch()
         main_layout.addLayout(bottom_layout)
 
-
         self.auto_refresh_checkbox.stateChanged.connect(self.toggle_auto_refresh)
         self.undo_button.clicked.connect(self.undo_action)
         self.redo_button.clicked.connect(self.redo_action)
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh_ports)
-        self.toggle_auto_refresh(Qt.Checked if self.auto_refresh_checkbox.isChecked() else Qt.Unchecked)
+        # Don't start the normal timer yet - let the startup refresh handle it
+        self.auto_refresh_enabled = auto_refresh_enabled
 
 
     def switch_tab(self, index):
@@ -365,7 +439,13 @@ class JackConnectionManager(QMainWindow):
         self.refresh_ports()
 
     def toggle_auto_refresh(self, state):
-        self.timer.start(1000) if state == Qt.Checked else self.timer.stop()
+        is_checked = state == Qt.Checked
+        if is_checked:
+            self.timer.start(1000)
+        else:
+            self.timer.stop()
+        # Save state to config
+        self.config_manager.set_bool('auto_refresh_enabled', is_checked)
 
     def is_dark_mode(self):
         palette = QApplication.palette()

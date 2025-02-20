@@ -4,23 +4,43 @@ import json
 import re
 import fcntl
 import os
+import dbus
+import configparser
 from PyQt5.QtCore import Qt, QTimer, QFile, QMargins
 from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QLineEdit, QPushButton, QLabel,
                              QSpacerItem, QSizePolicy, QMessageBox, QGroupBox,
-                             QCheckBox, QSystemTrayIcon, QMenu, QAction)
+                             QCheckBox, QSystemTrayIcon, QMenu, QAction, QActionGroup)
 
 class PipeWireSettingsApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.initUI()
-        self.profile_index_map = {}
-        self.load_current_settings()
-        self.tray_icon = None
+        self.flatpak_env = os.path.exists('/.flatpak-info')
+        self.tray_icon = None  # Initialize tray_icon here
         self.tray_enabled = False
         self.connection_manager_process = None
-        self.tray_click_opens_cables = True #Change to 'False' to open Cable (main app) from tray icon rather than Cables (connections manager)
+        self.tray_click_opens_cables = True #depreciated: [Change to 'False' to open Cable (main app) from tray icon rather than Cables (connections manager)]
+        self.profile_index_map = {}
+
+        self.initUI()  # Initialize UI first
+        self.load_settings()  # Load settings after UI and attributes are initialized
+        self.load_current_settings()
+
+    def get_metadata_value(self, key):
+        """Get pipewire metadata values without shell pipelines"""
+        output = self.run_command(['pw-metadata', '-n', 'settings'])
+        if not output:
+            return None
+
+        for line in output.split('\n'):
+            if key in line:
+                try:
+                    return line.split("'")[3]  # Extract value from metadata line
+                except IndexError:
+                    continue
+        return None
+
 
     def create_section_group(self, title, layout):
         group = QGroupBox()
@@ -215,23 +235,58 @@ class PipeWireSettingsApp(QWidget):
         main_layout.addLayout(tray_toggle_layout)
 
 
+    def load_settings(self):
+        """Load saved settings from config file"""
+        config = configparser.ConfigParser()
+        config_path = os.path.expanduser("~/.config/cable/config.ini")
 
+        # Default settings
+        tray_enabled = False
+        tray_click_opens_cables = True
 
+        if os.path.exists(config_path):
+            try:
+                config.read(config_path)
+                # Load tray enabled state
+                tray_enabled = config.getboolean('DEFAULT', 'tray_enabled', fallback=False)
+                # Load default app setting
+                tray_click_opens_cables = config.getboolean(
+                    'DEFAULT', 'tray_click_opens_cables', fallback=True
+                )
+                print(f"Loaded tray_click_opens_cables from config: {tray_click_opens_cables}")
+            except Exception as e:
+                print(f"Error loading settings: {e}")
 
-    def toggle_tray_icon(self, state):
-        if state == Qt.Checked:
-            self.tray_enabled = True
-            self.setup_tray_icon()
-        else:
-            self.tray_enabled = False
+        # Set the tray toggle checkbox state
+        self.tray_toggle_checkbox.setChecked(tray_enabled)
+        self.tray_click_opens_cables = tray_click_opens_cables
+
+        if tray_enabled:
+            # Remove the old tray icon first if it exists
             if self.tray_icon:
                 self.tray_icon.hide()
                 self.tray_icon = None
+            # Then create a new one with updated settings
+            self.toggle_tray_icon(Qt.Checked)
 
-
+    def save_settings(self):
+            """Save current settings to config file"""
+            config = configparser.ConfigParser()
+            config['DEFAULT'] = {
+                'tray_enabled': str(self.tray_toggle_checkbox.isChecked()),
+                'tray_click_opens_cables': str(self.tray_click_opens_cables)
+            }
+            config_path = os.path.expanduser("~/.config/cable/config.ini")
+            try:
+                os.makedirs(os.path.dirname(config_path), exist_ok=True)
+                with open(config_path, 'w') as configfile:
+                    config.write(configfile)
+            except Exception as e:
+                print(f"Error saving settings: {e}")
 
     def setup_tray_icon(self):
         if not self.tray_icon:
+            print(f"Setting up tray icon with tray_click_opens_cables: {self.tray_click_opens_cables}")
             self.tray_icon = QSystemTrayIcon(self)
 
             # List of possible icon locations
@@ -251,19 +306,55 @@ class PipeWireSettingsApp(QWidget):
 
             # Create the menu
             tray_menu = QMenu()
-            show_action = QAction("Cable", self)
+
+            # Create regular menu items for direct access
+            show_cable_action = QAction("Cable", self)
+            show_cables_action = QAction("Cables", self)
+
+            # Connect the regular menu items
+            show_cable_action.triggered.connect(self.handle_show_action)
+            show_cables_action.triggered.connect(self.handle_cables_action)
+
+            # Create a submenu for click behavior selection
+            click_menu = QMenu("Default App", self)
+
+            # Create actions for the radio buttons
+            cable_action = QAction("Cable", self)
             cables_action = QAction("Cables", self)
-            quit_action = QAction("Quit", self)
 
-            tray_menu.addAction(show_action)
-            tray_menu.addAction(cables_action)
+            # Make them checkable and exclusive
+            cable_action.setCheckable(True)
+            cables_action.setCheckable(True)
+
+            # Set initial state based on loaded setting (now guaranteed to be boolean)
+            cable_action.setChecked(not bool(self.tray_click_opens_cables))
+            cables_action.setChecked(bool(self.tray_click_opens_cables))
+
+            # Create an action group to make the selection exclusive
+            action_group = QActionGroup(self)
+            action_group.addAction(cable_action)
+            action_group.addAction(cables_action)
+            action_group.setExclusive(True)
+
+            # Connect the actions to update the tray click behavior
+            cable_action.triggered.connect(lambda: self.set_tray_click_target(False))
+            cables_action.triggered.connect(lambda: self.set_tray_click_target(True))
+
+            # Add actions to the click submenu
+            click_menu.addAction(cable_action)
+            click_menu.addAction(cables_action)
+
+            # Build the complete menu
+            tray_menu.addAction(show_cable_action)
+            tray_menu.addAction(show_cables_action)
             tray_menu.addSeparator()
-            tray_menu.addAction(quit_action)
+            tray_menu.addMenu(click_menu)
+            tray_menu.addSeparator()
 
-            # Connect the actions
-            show_action.triggered.connect(self.handle_show_action) # Use new handler function
-            cables_action.triggered.connect(self.handle_cables_action) # Use new handler for Cables menu
+            # Add quit action
+            quit_action = QAction("Quit", self)
             quit_action.triggered.connect(self.quit_app)
+            tray_menu.addAction(quit_action)
 
             # Set the menu for the tray icon
             self.tray_icon.setContextMenu(tray_menu)
@@ -273,6 +364,30 @@ class PipeWireSettingsApp(QWidget):
 
         # Show the tray icon
         self.tray_icon.show()
+
+    def set_tray_click_target(self, opens_cables):
+        """Update which application opens on tray icon click"""
+        print(f"Setting tray click target - opens_cables: {opens_cables}")
+        self.tray_click_opens_cables = opens_cables
+
+        # Update the menu item checked states
+        if hasattr(self, 'cable_action') and hasattr(self, 'cables_action'):
+            self.cable_action.setChecked(not opens_cables)
+            self.cables_action.setChecked(opens_cables)
+
+        self.save_settings()
+
+    def toggle_tray_icon(self, state):
+        if state == Qt.Checked:
+            self.tray_enabled = True
+            self.setup_tray_icon()
+        else:
+            self.tray_enabled = False
+            if self.tray_icon:
+                self.tray_icon.hide()
+                self.tray_icon = None
+        self.save_settings()  # Save settings when state changes
+
 
     def handle_show_action(self): # New handler function
         if not self.isVisible():
@@ -402,19 +517,66 @@ class PipeWireSettingsApp(QWidget):
 
     def restart_wireplumber(self):
         try:
-            subprocess.run(["systemctl", "restart", "--user", "wireplumber"], check=True)
+            bus = dbus.SessionBus()  # Connect to the session bus for user services
+            systemd_user = bus.get_object('org.freedesktop.systemd1', '/org/freedesktop/systemd1') # changed path here
+            manager = dbus.Interface(systemd_user, 'org.freedesktop.systemd1.Manager')
+            manager.RestartUnit('wireplumber.service', 'replace') # Use service name without --user
             QMessageBox.information(self, "Success", "Wireplumber restarted successfully")
             self.reload_app_settings()
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "Error", f"Error restarting Wireplumber: {e}")
+
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name()
+            error_message = str(e)
+
+            if "org.freedesktop.DBus.Error.UnknownObject" in error_name:
+                QMessageBox.critical(self, "Error",
+                                     "Error restarting Wireplumber: Systemd user manager not found.\n"
+                                     "This might be due to Flatpak sandboxing restrictions.\n"
+                                     f"Details: {error_message}")
+            elif "org.freedesktop.systemd1.Error.UnitNotFound" in error_name:
+                 QMessageBox.critical(self, "Error",
+                                     "Error restarting Wireplumber: Wireplumber user service not found.\n"
+                                     "Ensure Wireplumber is installed and the user service is enabled.\n"
+                                     f"Details: {error_message}")
+            elif "org.freedesktop.systemd1.Error.Failed" in error_name:
+                 QMessageBox.critical(self, "Error",
+                                     "Error restarting Wireplumber: Restart operation failed.\n"
+                                     "Check Wireplumber logs for more details.\n"
+                                     f"Details: {error_message}")
+            else: # General DBus error
+                QMessageBox.critical(self, "Error", f"Error restarting Wireplumber: {error_message}")
+
 
     def restart_pipewire(self):
         try:
-            subprocess.run(["systemctl", "restart", "--user", "pipewire"], check=True)
+            bus = dbus.SessionBus() # Connect to the session bus for user services
+            systemd_user = bus.get_object('org.freedesktop.systemd1', '/org/freedesktop/systemd1') # changed path here
+            manager = dbus.Interface(systemd_user, 'org.freedesktop.systemd1.Manager')
+            manager.RestartUnit('pipewire.service', 'replace') # Use service name without --user
             QMessageBox.information(self, "Success", "Pipewire restarted successfully")
             self.reload_app_settings()
-        except subprocess.CalledProcessError as e:
-            QMessageBox.critical(self, "Error", f"Error restarting Pipewire: {e}")
+
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name()
+            error_message = str(e)
+
+            if "org.freedesktop.DBus.Error.UnknownObject" in error_name:
+                QMessageBox.critical(self, "Error",
+                                     "Error restarting Pipewire: Systemd user manager not found.\n"
+                                     "This might be due to Flatpak sandboxing restrictions.\n"
+                                     f"Details: {error_message}")
+            elif "org.freedesktop.systemd1.Error.UnitNotFound" in error_name:
+                 QMessageBox.critical(self, "Error",
+                                     "Error restarting Pipewire: Pipewire user service not found.\n"
+                                     "Ensure Pipewire is installed and the user service is enabled.\n"
+                                     f"Details: {error_message}")
+            elif "org.freedesktop.systemd1.Error.Failed" in error_name:
+                 QMessageBox.critical(self, "Error",
+                                     "Error restarting Pipewire: Restart operation failed.\n"
+                                     "Check Pipewire logs for more details.\n"
+                                     f"Details: {error_message}")
+            else: # General DBus error
+                QMessageBox.critical(self, "Error", f"Error restarting Pipewire: {error_message}")
 
     def reload_app_settings(self):
         # Schedule the reload after a short delay to allow services to fully restart
@@ -438,15 +600,21 @@ class PipeWireSettingsApp(QWidget):
 
     def load_devices(self):
         self.device_combo.clear()
-        self.device_combo.addItem("Choose device")  # Add dummy option
+        self.device_combo.addItem("Choose device")
         try:
-            output = subprocess.check_output(["pw-cli", "ls", "Device"], universal_newlines=True)
+            output = self.run_command(['pw-cli', 'ls', 'Device'])
+            if not output:
+                print("Error: Empty response from pw-cli")
+                return
+
             devices = output.split('\n')
             current_device_id = None
             current_device_description = None
             current_device_name = None
+
             for line in devices:
-                if line.strip().startswith("id "):
+                line = line.strip()
+                if line.startswith("id "):
                     current_device_id = line.split(',')[0].split()[-1].strip()
                 elif "device.description" in line:
                     current_device_description = line.split('=')[1].strip().strip('"')
@@ -455,37 +623,57 @@ class PipeWireSettingsApp(QWidget):
                     if current_device_description and current_device_name and current_device_name.startswith("alsa_"):
                         device_label = f"{current_device_description} (ID: {current_device_id})"
                         self.device_combo.addItem(device_label)
+                    # Reset for next device
                     current_device_id = None
                     current_device_description = None
                     current_device_name = None
-        except subprocess.CalledProcessError:
-            print("Error: Unable to retrieve device list.")
+
+        except Exception as e:
+            print(f"Error loading devices: {e}")
+            QMessageBox.critical(self, "Error",
+                f"Could not retrieve devices:\n{str(e)}")
 
     def load_nodes(self):
         self.node_combo.clear()
-        self.node_combo.addItem("Choose Node")  # Add "Choose Node" option
+        self.node_combo.addItem("Choose Node")
         try:
-            output = subprocess.check_output(["pw-cli", "ls", "Node"], universal_newlines=True)
+            output = self.run_command(['pw-cli', 'ls', 'Node'])
+            if not output:
+                print("Error: Empty response from pw-cli")
+                return
+
             nodes = output.split('\n')
             current_node_id = None
             current_node_description = None
             current_node_name = None
+
             for line in nodes:
-                if line.strip().startswith("id "):
+                line = line.strip()
+                if line.startswith("id "):
                     current_node_id = line.split(',')[0].split()[-1].strip()
                 elif "node.description" in line:
                     current_node_description = line.split('=')[1].strip().strip('"')
                 elif "node.name" in line:
                     current_node_name = line.split('=')[1].strip().strip('"')
                     if current_node_description and current_node_name and current_node_name.startswith("alsa_"):
-                        io_type = "Input" if "input" in current_node_name.lower() else "Output" if "output" in current_node_name.lower() else "Unknown"
+                        # Determine I/O type
+                        io_type = "Unknown"
+                        if "input" in current_node_name.lower():
+                            io_type = "Input"
+                        elif "output" in current_node_name.lower():
+                            io_type = "Output"
+
                         node_label = f"{current_node_description} ({io_type}) (ID: {current_node_id})"
                         self.node_combo.addItem(node_label)
+                    # Reset for next node
                     current_node_id = None
                     current_node_description = None
                     current_node_name = None
-        except subprocess.CalledProcessError:
-            print("Error: Unable to retrieve node list.")
+
+        except Exception as e:
+            print(f"Error loading nodes: {e}")
+            QMessageBox.critical(self, "Error",
+                f"Could not retrieve nodes:\n{str(e)}")
 
     def on_device_changed(self, index):
         if index > 0:  # Ignore the "Choose device" option
@@ -566,123 +754,212 @@ class PipeWireSettingsApp(QWidget):
         latency_offset = self.latency_input.text()
 
         try:
-            if self.nanoseconds_checkbox.isChecked():
-                command = f"pw-cli s {node_id} ProcessLatency '{{ ns = {latency_offset} }}'"
-            else:
-                command = f"pw-cli s {node_id} ProcessLatency '{{ rate = {latency_offset} }}'"
+            # Build base command
+            command = [
+                'pw-cli',
+                's',
+                node_id,
+                'ProcessLatency'
+            ]
 
-            subprocess.run(command, shell=True, check=True)
+            # Add latency parameter
+            if self.nanoseconds_checkbox.isChecked():
+                command.append(f'{{ ns = {latency_offset} }}')
+            else:
+                command.append(f'{{ rate = {latency_offset} }}')
+
+            # Add Flatpak prefix if needed
+            if self.flatpak_env:
+                command = ['flatpak-spawn', '--host'] + command
+
+            # Run command
+            result = subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+
             print(f"Applied latency offset {latency_offset} to node {selected_node}")
+            print(f"Command output: {result.stdout}")
+
         except subprocess.CalledProcessError as e:
-            print(f"Error: Unable to apply settings to node {selected_node}")
-            print(f"Command failed with error: {e}")
+            error_msg = f"Failed to apply latency settings:\n{e.stderr}"
+            print(error_msg)
+            QMessageBox.critical(
+                self,
+                "Latency Error",
+                f"{error_msg}\n\n"
+                "Possible solutions:\n"
+                "1. Ensure PipeWire is running\n"
+                "2. Check Flatpak permissions\n"
+                "3. Verify node ID is correct"
+            )
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            print(error_msg)
+            QMessageBox.critical(
+                self,
+                "Error",
+                error_msg
+            )
 
     def apply_profile_settings(self):
         selected_device = self.device_combo.currentText()
         device_id = selected_device.split('(ID: ')[-1].strip(')')
         selected_profile = self.profile_combo.currentText()
-        profile_index = self.profile_index_map.get(selected_profile, 'Unknown')
+        profile_index = self.profile_index_map.get(selected_profile)
 
         try:
-            command = f"wpctl set-profile {device_id} {profile_index}"
-            subprocess.run(command, shell=True, check=True)
+            self.run_command(['wpctl', 'set-profile', device_id, str(profile_index)], check_output=False)
             print(f"Applied profile {selected_profile} to device {selected_device}")
-        except subprocess.CalledProcessError as e:
-            print(f"Error: Unable to apply profile to device {selected_device}")
-            print(f"Command failed with error: {e}")
+        except Exception as e:
+            print(f"Error applying profile: {e}")
 
     def apply_quantum_settings(self):
         quantum_value = self.quantum_combo.currentText()
         try:
-            command = f"pw-metadata -n settings 0 clock.force-quantum {quantum_value}"
-            subprocess.run(command, shell=True, check=True)
+            self.run_command([
+                'pw-metadata',
+                '-n', 'settings',
+                '0', 'clock.force-quantum',
+                quantum_value
+            ], check_output=False)
             print(f"Applied quantum/buffer setting: {quantum_value}")
-        except subprocess.CalledProcessError as e:
-            print(f"Error: Unable to apply quantum/buffer setting")
-            print(f"Command failed with error: {e}")
+        except Exception as e:
+            print(f"Error applying quantum: {e}")
 
     def reset_quantum_settings(self):
         try:
-            command = "pw-metadata -n settings 0 clock.force-quantum 0"
-            subprocess.run(command, shell=True, check=True)
+            command = ["pw-metadata", "-n", "settings", "0", "clock.force-quantum", "0"]
+            if self.flatpak_env:
+                command = ["flatpak-spawn", "--host"] + command
+
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             print("Reset quantum/buffer setting to default")
-            self.load_current_settings()  # Reload current settings to update the UI
+            self.load_current_settings()
         except subprocess.CalledProcessError as e:
-            print("Error: Unable to reset quantum/buffer setting")
-            print(f"Command failed with error: {e}")
+            print(f"Reset quantum failed: {e.stderr.decode()}")
+            QMessageBox.critical(
+                self,
+                "Permission Error",
+                "Failed to reset quantum settings:\n"
+                "Ensure Flatpak permissions are properly configured\n"
+                f"Details: {e.stderr.decode()}"
+            )
 
     def apply_sample_rate_settings(self):
         sample_rate = self.sample_rate_combo.currentText()
         try:
-            command = f"pw-metadata -n settings 0 clock.force-rate {sample_rate}"
-            subprocess.run(command, shell=True, check=True)
+            self.run_command([
+                'pw-metadata',
+                '-n', 'settings',
+                '0', 'clock.force-rate',
+                sample_rate
+            ], check_output=False)
             print(f"Applied sample rate setting: {sample_rate}")
-        except subprocess.CalledProcessError as e:
-            print(f"Error: Unable to apply sample rate setting")
-            print(f"Command failed with error: {e}")
+        except Exception as e:
+            print(f"Error applying sample rate: {e}")
 
     def reset_sample_rate_settings(self):
         try:
-            command = "pw-metadata -n settings 0 clock.force-rate 0"
-            subprocess.run(command, shell=True, check=True)
+            command = ["pw-metadata", "-n", "settings", "0", "clock.force-rate", "0"]
+            if self.flatpak_env:
+                command = ["flatpak-spawn", "--host"] + command
+
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             print("Reset sample rate setting to default")
-            self.load_current_settings()  # Reload current settings to update the UI
+            self.load_current_settings()
         except subprocess.CalledProcessError as e:
-            print("Error: Unable to reset sample rate setting")
-            print(f"Command failed with error: {e}")
+            print(f"Reset sample rate failed: {e.stderr.decode()}")
+            QMessageBox.critical(
+                self,
+                "Permission Error",
+                "Failed to reset sample rate settings:\n"
+                "Ensure Flatpak permissions are properly configured\n"
+                f"Details: {e.stderr.decode()}"
+            )
+        except Exception as e:
+            print(f"Unexpected error: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to reset sample rate: {str(e)}"
+            )
 
     def load_current_settings(self):
         try:
-            # Get forced sample rate
-            forced_rate = self.run_command("pw-metadata -n settings | grep clock.force-rate | awk -F\"'\" '{print $4}'")
-
-            if forced_rate == "0" or not forced_rate:
-                # If forced rate is 0 or not set, get the default rate
-                sample_rate = self.run_command("pw-metadata -n settings | grep clock.rate | awk -F\"'\" '{print $4}'")
+            # Get sample rate
+            forced_rate = self.get_metadata_value('clock.force-rate')
+            if forced_rate in (None, "0"):
+                sample_rate = self.get_metadata_value('clock.rate')
             else:
                 sample_rate = forced_rate
 
-            # Get forced quantum
-            forced_quantum = self.run_command("pw-metadata -n settings | grep clock.force-quantum | awk -F\"'\" '{print $4}'")
-
-            if forced_quantum == "0" or not forced_quantum:
-                # If forced quantum is 0 or not set, get the default quantum
-                quantum = self.run_command("pw-metadata -n settings | grep clock.quantum | awk -F\"'\" '{print $4}'")
+            # Get quantum
+            forced_quantum = self.get_metadata_value('clock.force-quantum')
+            if forced_quantum in (None, "0"):
+                quantum = self.get_metadata_value('clock.quantum')
             else:
                 quantum = forced_quantum
 
-            # Update sample rate combo box
+            # Update UI elements
             if sample_rate:
                 index = self.sample_rate_combo.findText(sample_rate)
                 if index >= 0:
                     self.sample_rate_combo.setCurrentIndex(index)
                 else:
-                    print(f"Current sample rate {sample_rate} not found in combo box options. Adding it.")
                     self.sample_rate_combo.addItem(sample_rate)
                     self.sample_rate_combo.setCurrentText(sample_rate)
 
-            # Update quantum combo box
             if quantum:
                 index = self.quantum_combo.findText(quantum)
                 if index >= 0:
                     self.quantum_combo.setCurrentIndex(index)
                 else:
-                    print(f"Current quantum {quantum} not found in combo box options. Adding it.")
                     self.quantum_combo.addItem(quantum)
                     self.quantum_combo.setCurrentText(quantum)
 
             self.update_latency_display()
 
-        except subprocess.CalledProcessError as e:
-            print(f"Error: Unable to retrieve current settings")
-            print(f"Command failed with error: {e}")
+        except Exception as e:
+            print(f"Error loading settings: {e}")
 
-    def run_command(self, command):
+
+    def run_command(self, command_args, check_output=True):
+        """Generic command runner with Flatpak support"""
+        if self.flatpak_env:
+            command_args = ['flatpak-spawn', '--host'] + command_args
+
         try:
-            result = subprocess.check_output(command, shell=True, universal_newlines=True).strip()
-            return result
-        except subprocess.CalledProcessError:
-            print(f"Error running command: {command}")
+            if check_output:
+                result = subprocess.check_output(
+                    command_args,
+                    universal_newlines=True,
+                    stderr=subprocess.DEVNULL
+                )
+                return result.strip()
+            else:
+                subprocess.run(
+                    command_args,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return True
+        except subprocess.CalledProcessError as e:
+            print(f"Command failed: {e}")
             return None
 
     def update_latency_display(self):
