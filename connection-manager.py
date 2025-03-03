@@ -3,14 +3,14 @@ import random
 import re
 import configparser
 import os
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
-                             QGraphicsPathItem, QCheckBox, QMenu, QAction, QSizePolicy, QSpacerItem,
+                             QGraphicsPathItem, QCheckBox, QMenu, QSizePolicy, QSpacerItem,
                              QButtonGroup)
-from PyQt5.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect
-from PyQt5.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
-                         QPainterPath, QFontMetrics, QFont)
+from PyQt6.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect
+from PyQt6.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
+                         QPainterPath, QFontMetrics, QFont, QAction) # Moved QAction to QtGui import
 import jack
 
 class ConfigManager:
@@ -47,7 +47,7 @@ class ConfigManager:
         self.save_config()
 
     def save_config(self):
-        with open(self.config_file, 'w') as configfile:
+        with open(self.config_file, 'w') as configfile: # Corrected line 52: ' replaced with )
             self.config.write(configfile)
 
     def get_bool(self, key, default=True):
@@ -66,14 +66,14 @@ class ElidedListWidgetItem(QListWidgetItem):
 
     def elide_text(self, text, width):
         font_metrics = QFontMetrics(self.font())
-        return font_metrics.elidedText(text, Qt.ElideRight, width)
+        return font_metrics.elidedText(text, Qt.TextElideMode.ElideRight, width)
 
 class PortListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumWidth(100)
         self._width = 150
         self.current_drag_highlight_item = None
@@ -95,7 +95,7 @@ class PortListWidget(QListWidget):
             disconnect_action = QAction("Disconnect all", self)
             disconnect_action.triggered.connect(lambda checked, name=(item.full_text if isinstance(item, ElidedListWidgetItem) else item.text()): self.window().disconnect_node(name))
             menu.addAction(disconnect_action)
-            menu.exec_(self.mapToGlobal(position))
+            menu.exec(self.mapToGlobal(position))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -123,7 +123,7 @@ class DragListWidget(PortListWidget): # Output List
         super().__init__(parent)
         self.setDragEnabled(True)
         self.setAcceptDrops(True) # Accept drops
-        self.setDragDropMode(QListWidget.DragDrop)
+        self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
 
 
     def startDrag(self, supportedActions):
@@ -133,14 +133,16 @@ class DragListWidget(PortListWidget): # Output List
             mime_data.setText(item.full_text if isinstance(item, ElidedListWidgetItem) else item.text())
             drag = QDrag(self)
             drag.setMimeData(mime_data)
-            drag.exec_(Qt.CopyAction)
+            drag.exec(Qt.DropAction.CopyAction)
 
     def dragEnterEvent(self, event):  # Handle drag enter for drops *onto* output list
+    #    print("DragListWidget: dragEnterEvent triggered!")  # ADD THIS DEBUG PRINT
         if event.mimeData().hasText():
             event.acceptProposedAction()
 
     def dragMoveEvent(self, event):
-        item = self.itemAt(event.pos())
+    #    print("DragListWidget: dragMoveEvent triggered") # Debug print
+        item = self.itemAt(event.position().toPoint())
         if item and item != self.current_drag_highlight_item:
             self.window().clear_drop_target_highlight(self)
             self.window().highlight_drop_target_item(self, item)
@@ -150,15 +152,17 @@ class DragListWidget(PortListWidget): # Output List
             self.current_drag_highlight_item = None
         super().dragMoveEvent(event)
 
-
     def dropEvent(self, event):  # Handle drops *onto* the output list
+   #     print("DragListWidget: dropEvent triggered") # Debug print
         source = event.source()
-        if isinstance(source, DropListWidget):  # Dropped from input to output
-            input_name = event.mimeData().text() # Get input name from mime data
-            output_item = self.itemAt(event.pos()) # Get output item at drop position
+    #    print(f"DragListWidget: Drop Source: {source}") # Debug print
+        if isinstance(source, DropListWidget):
+            input_name = event.mimeData().text()
+            output_item = self.itemAt(event.position().toPoint())
             if output_item:
-                output_name = output_item.full_text if isinstance(output_item, ElidedListWidgetItem) else output_item.text() # Get output name
-                self.window().make_connection(output_name, input_name)  # Correct order: output -> input
+                output_name = output_item.full_text if isinstance(output_item, ElidedListWidgetItem) else output_item.text()
+      #          print(f"DragListWidget: Connecting Output: {output_name}, Input: {input_name}") # Debug print
+                self.window().make_connection(output_name, input_name)
             event.acceptProposedAction()
         super().dropEvent(event)
 
@@ -168,10 +172,11 @@ class DropListWidget(PortListWidget): # Input List
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
-        self.setDragDropMode(QListWidget.DragDrop)
+        self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
 
 
     def dragEnterEvent(self, event): # for drag *from* input list - not needed for drops *onto* input list in this direction
+     #   print("DropListWidget: dragEnterEvent triggered!") # ADD THIS DEBUG PRINT
         if event.mimeData().hasText():
             event.acceptProposedAction()
 
@@ -182,10 +187,11 @@ class DropListWidget(PortListWidget): # Input List
             mime_data.setText(item.full_text if isinstance(item, ElidedListWidgetItem) else item.text())
             drag = QDrag(self)
             drag.setMimeData(mime_data)
-            drag.exec_(Qt.CopyAction)
+            drag.exec(Qt.DropAction.CopyAction)
 
     def dragMoveEvent(self, event):
-        item = self.itemAt(event.pos())
+   #     print("DropListWidget: dragMoveEvent triggered") # Debug print
+        item = self.itemAt(event.position().toPoint())
         if item and item != self.current_drag_highlight_item:
             self.window().clear_drop_target_highlight(self)
             self.window().highlight_drop_target_item(self, item)
@@ -195,34 +201,36 @@ class DropListWidget(PortListWidget): # Input List
             self.current_drag_highlight_item = None
         super().dragMoveEvent(event)
 
-
     def dropEvent(self, event):  # Handle drops *onto* the input list (from output list)
+#        print("DropListWidget: dropEvent triggered") # Debug print
         source = event.source()
-        if isinstance(source, DragListWidget):   # Ensure the source is the output list
-            output_name = event.mimeData().text() # Get the dragged output port name
-            input_item = self.itemAt(event.pos()) # Get the input item where it's dropped
+  #      print(f"DropListWidget: Drop Source: {source}") # Debug print
+        if isinstance(source, DragListWidget):
+            output_name = event.mimeData().text()
+            input_item = self.itemAt(event.position().toPoint())
             if input_item:
-                input_name = input_item.full_text if isinstance(input_item, ElidedListWidgetItem) else input_item.text() # Get the input port name
-                self.window().make_connection(output_name, input_name) # Make the connection: output -> input
+                input_name = input_item.full_text if isinstance(input_item, ElidedListWidgetItem) else input_item.text()
+      #          print(f"DropListWidget: Connecting Output: {output_name}, Input: {input_name}") # Debug print
+                self.window().make_connection(output_name, input_name)
             event.acceptProposedAction()
         else:
-            event.ignore() # If the source is not DragListWidget, ignore the drop
+            event.ignore()
         super().dropEvent(event)
 
 
 class ConnectionView(QGraphicsView):
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
-        self.setRenderHint(QPainter.Antialiasing, True)
-        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+        self.fitInView(self.scene().sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
 class ConnectionHistory:
     def __init__(self):
@@ -259,7 +267,7 @@ class JackConnectionManager(QMainWindow):
         self.config_manager = ConfigManager()
         self.minimize_on_close = True
         self.setWindowTitle('Cables')
-        self.setGeometry(100, 100, 1250, 705)
+        self.setGeometry(100, 100, 1300, 800)
         self.initial_middle_width = 250
         self.port_type = 'audio'
         self.client = jack.Client('ConnectionManager')
@@ -299,7 +307,7 @@ class JackConnectionManager(QMainWindow):
     def start_startup_refresh(self):
         """Start the rapid refresh sequence on startup"""
         self.startup_refresh_count = 0
-        self.startup_refresh_timer.start(10)  # 10ms interval
+        self.startup_refresh_timer.start(1)  # 10ms interval
 
     def startup_refresh(self):
         """Handle the rapid refresh sequence"""
@@ -337,8 +345,8 @@ class JackConnectionManager(QMainWindow):
         output_list.setStyleSheet(self.list_stylesheet())
         connection_view.setStyleSheet(f"background: {self.background_color.name()}; border: none;")
 
-        input_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Minimum, QSizePolicy.Fixed))
-        output_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Minimum, QSizePolicy.Fixed))
+        input_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
+        output_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
 
         input_layout.addWidget(input_label)
         input_layout.addWidget(input_list)
@@ -360,7 +368,7 @@ class JackConnectionManager(QMainWindow):
 
         middle_layout_widget = QWidget()
         middle_layout_widget.setLayout(middle_layout)
-        middle_layout_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        middle_layout_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         middle_layout_widget.setFixedWidth(self.initial_middle_width)
 
         middle_layout.addLayout(button_layout)
@@ -439,7 +447,7 @@ class JackConnectionManager(QMainWindow):
         self.refresh_ports()
 
     def toggle_auto_refresh(self, state):
-        is_checked = state == Qt.Checked
+        is_checked = state == Qt.CheckState.Checked
         if is_checked:
             self.timer.start(1000)
         else:
@@ -771,7 +779,7 @@ class JackConnectionManager(QMainWindow):
                 path_item = QGraphicsPathItem(path)
                 path_item.setPen(pen)
                 scene.addItem(path_item)
-        view.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
+        view.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
 
     def on_input_clicked(self, item):
@@ -925,7 +933,7 @@ def main():
     app = QApplication(sys.argv)
     window = JackConnectionManager()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 if __name__ == '__main__':
     main()

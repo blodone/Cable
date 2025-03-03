@@ -2,16 +2,73 @@ import sys
 import subprocess
 import json
 import re
-import fcntl
 import os
 import dbus
 import configparser
-from PyQt5.QtCore import Qt, QTimer, QFile, QMargins
-from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+import argparse
+import shutil
+from PyQt6.QtCore import Qt, QTimer, QFile, QMargins
+from PyQt6.QtGui import QFont, QIcon, QGuiApplication, QActionGroup, QAction
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QLineEdit, QPushButton, QLabel,
                              QSpacerItem, QSizePolicy, QMessageBox, QGroupBox,
-                             QCheckBox, QSystemTrayIcon, QMenu, QAction, QActionGroup)
+                             QCheckBox, QSystemTrayIcon, QMenu)
+
+class AutostartManager:
+    """Manages autostart functionality using XDG autostart"""
+    def __init__(self, flatpak_env=False):
+        self.autostart_dir = os.path.expanduser("~/.config/autostart")
+        self.desktop_file = os.path.join(self.autostart_dir, "cable-autostart.desktop")
+        
+        # Set the appropriate Exec line based on environment
+        exec_line = "/usr/bin/flatpak run com.example.cable --minimized" if flatpak_env else "cable --minimized"
+        
+        self.desktop_content = f"""[Desktop Entry]
+Type=Application
+Name=Cable
+Exec={exec_line}
+Icon=jack-plug
+Terminal=false
+X-GNOME-Autostart-enabled=true"""
+
+    def enable_autostart(self):
+        """Enable autostart by creating desktop file"""
+        try:
+            os.makedirs(self.autostart_dir, exist_ok=True)
+            with open(self.desktop_file, 'w') as f:
+                f.write(self.desktop_content)
+            os.chmod(self.desktop_file, 0o755)
+            return True
+        except Exception as e:
+            print(f"Error enabling autostart: {e}")
+            return False
+
+    def disable_autostart(self):
+        """Disable autostart by removing desktop file"""
+        try:
+            if os.path.exists(self.desktop_file):
+                os.remove(self.desktop_file)
+            return True
+        except Exception as e:
+            print(f"Error disabling autostart: {e}")
+            return False
+
+    def is_autostart_enabled(self):
+        """Check if autostart is enabled"""
+        return os.path.exists(self.desktop_file)
+
+
+class CableApp(QApplication):
+    def __init__(self, argv):
+        super().__init__(argv)
+
+        # Set the desktop filename for Wayland
+        # This needs to match your .desktop file name exactly
+        QGuiApplication.setDesktopFileName("com.example.cable")
+
+
+        # Set the application name to match the .desktop file
+        self.setApplicationName("Cable")
 
 class PipeWireSettingsApp(QWidget):
     def __init__(self):
@@ -20,12 +77,22 @@ class PipeWireSettingsApp(QWidget):
         self.tray_icon = None  # Initialize tray_icon here
         self.tray_enabled = False
         self.connection_manager_process = None
-        self.tray_click_opens_cables = True #depreciated: [Change to 'False' to open Cable (main app) from tray icon rather than Cables (connections manager)]
+        self.tray_click_opens_cables = True
         self.profile_index_map = {}
+
+        # Initialize autostart manager with Flatpak environment status
+        self.autostart_manager = AutostartManager(flatpak_env=self.flatpak_env)
+        
+        # Initialize settings flags
+        self.remember_settings = False
+        self.saved_quantum = 0
+        self.saved_sample_rate = 0
+        self.autostart_enabled = False
 
         self.initUI()  # Initialize UI first
         self.load_settings()  # Load settings after UI and attributes are initialized
         self.load_current_settings()
+
 
     def get_metadata_value(self, key):
         """Get pipewire metadata values without shell pipelines"""
@@ -53,7 +120,7 @@ class PipeWireSettingsApp(QWidget):
 
         title_label = QLabel(title)
         title_label.setFont(title_font)
-        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         layout.insertWidget(0, title_label)
 
@@ -70,7 +137,7 @@ class PipeWireSettingsApp(QWidget):
         device_layout = QHBoxLayout()
         device_label = QLabel("Audio Device:")
         self.device_combo = QComboBox()
-        self.device_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.device_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         device_layout.addWidget(device_label)
         device_layout.addWidget(self.device_combo)
         profile_layout.addLayout(device_layout)
@@ -79,7 +146,7 @@ class PipeWireSettingsApp(QWidget):
         profile_select_layout = QHBoxLayout()
         profile_label = QLabel("Device Profile:")
         self.profile_combo = QComboBox()
-        self.profile_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.profile_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         profile_select_layout.addWidget(profile_label)
         profile_select_layout.addWidget(self.profile_combo)
         profile_layout.addLayout(profile_select_layout)
@@ -215,7 +282,7 @@ class PipeWireSettingsApp(QWidget):
 
         self.setLayout(main_layout)
         self.setWindowTitle('Cable')
-        self.setMinimumSize(456, 820)  # Set minimum window size
+        self.setMinimumSize(474, 900)  # Set minimum window size
         self.resize(454, 820)  # Set initial size to the minimum
 
         self.load_nodes()
@@ -228,11 +295,19 @@ class PipeWireSettingsApp(QWidget):
 
         # System Tray Toggle Section
         tray_toggle_layout = QHBoxLayout()
-        self.tray_toggle_checkbox = QCheckBox("Enable System Tray Icon")
+        self.tray_toggle_checkbox = QCheckBox("Enable tray icon")
         self.tray_toggle_checkbox.setChecked(False)
         self.tray_toggle_checkbox.stateChanged.connect(self.toggle_tray_icon)
         tray_toggle_layout.addWidget(self.tray_toggle_checkbox)
         main_layout.addLayout(tray_toggle_layout)
+
+        # Remember Settings Section
+        remember_settings_layout = QHBoxLayout()
+        self.remember_settings_checkbox = QCheckBox("Save buffer and sample rate")
+        self.remember_settings_checkbox.setChecked(False)
+        self.remember_settings_checkbox.stateChanged.connect(self.toggle_remember_settings)
+        remember_settings_layout.addWidget(self.remember_settings_checkbox)
+        main_layout.addLayout(remember_settings_layout)
 
 
     def load_settings(self):
@@ -243,6 +318,10 @@ class PipeWireSettingsApp(QWidget):
         # Default settings
         tray_enabled = False
         tray_click_opens_cables = True
+        self.remember_settings = False
+        self.saved_quantum = 0
+        self.saved_sample_rate = 0
+        self.autostart_enabled = False
 
         if os.path.exists(config_path):
             try:
@@ -253,12 +332,29 @@ class PipeWireSettingsApp(QWidget):
                 tray_click_opens_cables = config.getboolean(
                     'DEFAULT', 'tray_click_opens_cables', fallback=True
                 )
+                # Load audio settings
+                self.remember_settings = config.getboolean('DEFAULT', 'remember_settings', fallback=False)
+                self.saved_quantum = config.getint('DEFAULT', 'saved_quantum', fallback=0)
+                self.saved_sample_rate = config.getint('DEFAULT', 'saved_sample_rate', fallback=0)
+                # Load autostart setting
+                self.autostart_enabled = config.getboolean('DEFAULT', 'autostart_enabled', fallback=False)
+                
                 print(f"Loaded tray_click_opens_cables from config: {tray_click_opens_cables}")
+                print(f"Loaded remember_settings: {self.remember_settings}")
+                print(f"Loaded autostart_enabled: {self.autostart_enabled}")
+
+                # Sync autostart file with config
+                if self.autostart_enabled != self.autostart_manager.is_autostart_enabled():
+                    if self.autostart_enabled:
+                        self.autostart_manager.enable_autostart()
+                    else:
+                        self.autostart_manager.disable_autostart()
             except Exception as e:
                 print(f"Error loading settings: {e}")
 
-        # Set the tray toggle checkbox state
+        # Set the checkbox states
         self.tray_toggle_checkbox.setChecked(tray_enabled)
+        self.remember_settings_checkbox.setChecked(self.remember_settings)
         self.tray_click_opens_cables = tray_click_opens_cables
 
         if tray_enabled:
@@ -267,22 +363,104 @@ class PipeWireSettingsApp(QWidget):
                 self.tray_icon.hide()
                 self.tray_icon = None
             # Then create a new one with updated settings
-            self.toggle_tray_icon(Qt.Checked)
+            self.toggle_tray_icon(Qt.CheckState.Checked)
+
+        # Apply saved audio settings if enabled
+        if self.remember_settings and self.saved_quantum > 0 and self.saved_sample_rate > 0:
+            try:
+                # Set quantum
+                self.quantum_combo.setCurrentText(str(self.saved_quantum))
+                self.apply_quantum_settings()
+                
+                # Set sample rate
+                self.sample_rate_combo.setCurrentText(str(self.saved_sample_rate))
+                self.apply_sample_rate_settings()
+            except Exception as e:
+                print(f"Error applying saved audio settings: {e}")
 
     def save_settings(self):
-            """Save current settings to config file"""
-            config = configparser.ConfigParser()
-            config['DEFAULT'] = {
-                'tray_enabled': str(self.tray_toggle_checkbox.isChecked()),
-                'tray_click_opens_cables': str(self.tray_click_opens_cables)
-            }
-            config_path = os.path.expanduser("~/.config/cable/config.ini")
-            try:
-                os.makedirs(os.path.dirname(config_path), exist_ok=True)
-                with open(config_path, 'w') as configfile:
-                    config.write(configfile)
-            except Exception as e:
-                print(f"Error saving settings: {e}")
+        """Save current settings to config file"""
+        config = configparser.ConfigParser()
+        config_path = os.path.expanduser("~/.config/cable/config.ini")
+        
+        # Load existing config if it exists
+        if os.path.exists(config_path):
+            config.read(config_path)
+            
+        if 'DEFAULT' not in config:
+            config['DEFAULT'] = {}
+            
+        # Update basic settings
+        config['DEFAULT'].update({
+            'tray_enabled': str(self.tray_toggle_checkbox.isChecked()),
+            'tray_click_opens_cables': str(self.tray_click_opens_cables),
+            'remember_settings': str(self.remember_settings),
+            'autostart_enabled': str(self.autostart_enabled)
+        })
+        
+        # Only save audio settings if remember_settings is True
+        if self.remember_settings:
+            current_quantum = self.quantum_combo.currentText()
+            current_sample_rate = self.sample_rate_combo.currentText()
+            if current_quantum:
+                config['DEFAULT']['saved_quantum'] = current_quantum
+            if current_sample_rate:
+                config['DEFAULT']['saved_sample_rate'] = current_sample_rate
+            print(f"Saved audio settings - Quantum: {current_quantum}, Sample Rate: {current_sample_rate}")
+        
+        try:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, 'w') as configfile:
+                config.write(configfile)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+
+    def toggle_remember_settings(self, state):
+        """Handle remember settings checkbox state changes"""
+        remember = bool(state)
+        self.remember_settings = remember
+        
+        # Update config
+        config = configparser.ConfigParser()
+        config_path = os.path.expanduser("~/.config/cable/config.ini")
+        
+        if os.path.exists(config_path):
+            config.read(config_path)
+        
+        if 'DEFAULT' not in config:
+            config['DEFAULT'] = {}
+        
+        if remember:
+            # Save current settings immediately when enabling
+            current_quantum = self.quantum_combo.currentText()
+            current_sample_rate = self.sample_rate_combo.currentText()
+            config['DEFAULT'].update({
+                'remember_settings': 'True',
+                'saved_quantum': current_quantum if current_quantum else '0',
+                'saved_sample_rate': current_sample_rate if current_sample_rate else '0'
+            })
+            print("Audio settings will be remembered and restored on startup")
+        else:
+            # Remove saved audio settings when disabling
+            config['DEFAULT']['remember_settings'] = 'False'
+            if 'saved_quantum' in config['DEFAULT']:
+                del config['DEFAULT']['saved_quantum']
+            if 'saved_sample_rate' in config['DEFAULT']:
+                del config['DEFAULT']['saved_sample_rate']
+            print("Audio settings will not be remembered")
+        
+        # Save other settings that might exist
+        if 'tray_enabled' in config['DEFAULT']:
+            config['DEFAULT']['tray_enabled'] = str(self.tray_toggle_checkbox.isChecked())
+        if 'tray_click_opens_cables' in config['DEFAULT']:
+            config['DEFAULT']['tray_click_opens_cables'] = str(self.tray_click_opens_cables)
+        
+        try:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, 'w') as configfile:
+                config.write(configfile)
+        except Exception as e:
+            print(f"Error saving remember settings: {e}")
 
     def setup_tray_icon(self):
         if not self.tray_icon:
@@ -291,7 +469,7 @@ class PipeWireSettingsApp(QWidget):
 
             # List of possible icon locations
             icon_locations = [
-                "/usr/share/icons/jack-plug.svg",  # System-wide installation
+                "/usr/share/icons/hicolor/scalable/apps/jack-plug.svg",  # System-wide installation
                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "jack-plug.svg"),  # Same directory as the script
                 os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "jack-plug.svg")  # Directory of the executed file
             ]
@@ -351,6 +529,14 @@ class PipeWireSettingsApp(QWidget):
             tray_menu.addMenu(click_menu)
             tray_menu.addSeparator()
 
+            # Add autostart toggle
+            autostart_action = QAction("Autostart", self)
+            autostart_action.setCheckable(True)
+            autostart_action.setChecked(self.autostart_enabled)
+            autostart_action.triggered.connect(self.toggle_autostart)
+            tray_menu.addAction(autostart_action)
+            tray_menu.addSeparator()
+
             # Add quit action
             quit_action = QAction("Quit", self)
             quit_action.triggered.connect(self.quit_app)
@@ -378,7 +564,8 @@ class PipeWireSettingsApp(QWidget):
         self.save_settings()
 
     def toggle_tray_icon(self, state):
-        if state == Qt.Checked:
+        state_enum = Qt.CheckState(state)
+        if state_enum == Qt.CheckState.Checked:
             self.tray_enabled = True
             self.setup_tray_icon()
         else:
@@ -386,12 +573,12 @@ class PipeWireSettingsApp(QWidget):
             if self.tray_icon:
                 self.tray_icon.hide()
                 self.tray_icon = None
-        self.save_settings()  # Save settings when state changes
+        self.save_settings()
 
 
     def handle_show_action(self): # New handler function
         if not self.isVisible():
-            self.showNormal()
+            self.show() # PyQt6: showNormal() is now show() for restoring
             self.activateWindow()
 
     def handle_cables_action(self): # New handler for Cables menu
@@ -409,20 +596,20 @@ class PipeWireSettingsApp(QWidget):
 
 
     def tray_icon_activated(self, reason):
-     if reason == QSystemTrayIcon.Trigger:  # Left click
+     if reason == QSystemTrayIcon.ActivationReason.Trigger:  # Left click
         if self.tray_click_opens_cables: # Check the toggle
             if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
                 # If Cables app is not running, launch it
                 self.launch_connection_manager()
             else:
                 if self.connection_manager_process.isMinimized() or not self.connection_manager_process.isVisible():
-                    self.connection_manager_process.showNormal()
+                    self.connection_manager_process.show() # PyQt6: showNormal() is now show() for restoring
                     self.connection_manager_process.activateWindow()
                 else:
                     self.connection_manager_process.hide()
         else:
             if self.isMinimized() or not self.isVisible():
-                self.showNormal()  # Restore window if minimized
+                self.show()  # Restore window if minimized # PyQt6: showNormal() is now show() for restoring
                 self.activateWindow()  # Bring window to the front
             else:
                 self.hide()  # Minimize to tray
@@ -471,12 +658,12 @@ class PipeWireSettingsApp(QWidget):
         if self.tray_enabled and self.tray_icon:
             event.ignore()
             self.hide()
-            self.tray_icon.showMessage(
-                "Cable",
-                "Application was minimized to the system tray",
-                QSystemTrayIcon.Information,
-                1500
-            )
+         #   self.tray_icon.showMessage(
+         #       "Cable",
+         #       "Application was minimized to the system tray",
+         #       QSystemTrayIcon.MessageIcon.Information,
+         #       1500
+         #   )
         else:
             event.accept()
 
@@ -504,15 +691,15 @@ class PipeWireSettingsApp(QWidget):
     def confirm_restart_wireplumber(self):
         reply = QMessageBox.question(self, 'Confirm Restart',
                                      "Are you sure you want to restart Wireplumber?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             self.restart_wireplumber()
 
     def confirm_restart_pipewire(self):
         reply = QMessageBox.question(self, 'Confirm Restart',
                                      "Are you sure you want to restart Pipewire?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             self.restart_pipewire()
 
     def restart_wireplumber(self):
@@ -827,11 +1014,16 @@ class PipeWireSettingsApp(QWidget):
                 quantum_value
             ], check_output=False)
             print(f"Applied quantum/buffer setting: {quantum_value}")
+            
+            # Save settings if remember settings is enabled
+            if self.remember_settings_checkbox.isChecked():
+                self.save_settings()
         except Exception as e:
             print(f"Error applying quantum: {e}")
 
     def reset_quantum_settings(self):
         try:
+            # Reset PipeWire quantum setting
             command = ["pw-metadata", "-n", "settings", "0", "clock.force-quantum", "0"]
             if self.flatpak_env:
                 command = ["flatpak-spawn", "--host"] + command
@@ -843,6 +1035,18 @@ class PipeWireSettingsApp(QWidget):
                 stderr=subprocess.PIPE
             )
             print("Reset quantum/buffer setting to default")
+            
+            # Remove saved_quantum from config if it exists
+            config = configparser.ConfigParser()
+            config_path = os.path.expanduser("~/.config/cable/config.ini")
+            if os.path.exists(config_path):
+                config.read(config_path)
+                if 'DEFAULT' in config and 'saved_quantum' in config['DEFAULT']:
+                    del config['DEFAULT']['saved_quantum']
+                    with open(config_path, 'w') as configfile:
+                        config.write(configfile)
+                    print("Removed saved quantum setting from config")
+            
             self.load_current_settings()
         except subprocess.CalledProcessError as e:
             print(f"Reset quantum failed: {e.stderr.decode()}")
@@ -853,6 +1057,8 @@ class PipeWireSettingsApp(QWidget):
                 "Ensure Flatpak permissions are properly configured\n"
                 f"Details: {e.stderr.decode()}"
             )
+        except Exception as e:
+            print(f"Error modifying config: {e}")
 
     def apply_sample_rate_settings(self):
         sample_rate = self.sample_rate_combo.currentText()
@@ -864,11 +1070,16 @@ class PipeWireSettingsApp(QWidget):
                 sample_rate
             ], check_output=False)
             print(f"Applied sample rate setting: {sample_rate}")
+            
+            # Save settings if remember settings is enabled
+            if self.remember_settings_checkbox.isChecked():
+                self.save_settings()
         except Exception as e:
             print(f"Error applying sample rate: {e}")
 
     def reset_sample_rate_settings(self):
         try:
+            # Reset PipeWire sample rate setting
             command = ["pw-metadata", "-n", "settings", "0", "clock.force-rate", "0"]
             if self.flatpak_env:
                 command = ["flatpak-spawn", "--host"] + command
@@ -880,6 +1091,18 @@ class PipeWireSettingsApp(QWidget):
                 stderr=subprocess.PIPE
             )
             print("Reset sample rate setting to default")
+            
+            # Remove saved_sample_rate from config if it exists
+            config = configparser.ConfigParser()
+            config_path = os.path.expanduser("~/.config/cable/config.ini")
+            if os.path.exists(config_path):
+                config.read(config_path)
+                if 'DEFAULT' in config and 'saved_sample_rate' in config['DEFAULT']:
+                    del config['DEFAULT']['saved_sample_rate']
+                    with open(config_path, 'w') as configfile:
+                        config.write(configfile)
+                    print("Removed saved sample rate setting from config")
+            
             self.load_current_settings()
         except subprocess.CalledProcessError as e:
             print(f"Reset sample rate failed: {e.stderr.decode()}")
@@ -891,12 +1114,7 @@ class PipeWireSettingsApp(QWidget):
                 f"Details: {e.stderr.decode()}"
             )
         except Exception as e:
-            print(f"Unexpected error: {str(e)}")
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to reset sample rate: {str(e)}"
-            )
+            print(f"Error modifying config: {e}")
 
     def load_current_settings(self):
         try:
@@ -962,6 +1180,31 @@ class PipeWireSettingsApp(QWidget):
             print(f"Command failed: {e}")
             return None
 
+    def toggle_autostart(self, checked):
+        """Toggle autostart setting"""
+        try:
+            if checked:
+                if self.autostart_manager.enable_autostart():
+                    self.autostart_enabled = True
+                    print("Autostart enabled")
+                else:
+                    QMessageBox.critical(self, "Error",
+                                      "Failed to enable autostart.\nCheck permissions and try again.")
+                    return
+            else:
+                if self.autostart_manager.disable_autostart():
+                    self.autostart_enabled = False
+                    print("Autostart disabled")
+                else:
+                    QMessageBox.critical(self, "Error",
+                                      "Failed to disable autostart.\nCheck permissions and try again.")
+                    return
+            
+            self.save_settings()
+        except Exception as e:
+            QMessageBox.critical(self, "Error",
+                              f"Error toggling autostart: {str(e)}")
+
     def update_latency_display(self):
         try:
             quantum = int(self.quantum_combo.currentText())
@@ -975,15 +1218,32 @@ class PipeWireSettingsApp(QWidget):
             self.latency_display_value.setText("N/A")
 
 def main():
-    app = QApplication(sys.argv)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Cable - PipeWire Settings Manager')
+    parser.add_argument('--minimized', action='store_true',
+                      help='Start application minimized to tray')
+    args = parser.parse_args(sys.argv[1:])  # Skip the first argument (script name)
+    
+    # Create application instance
+    app = CableApp(sys.argv)
+    
+    # Create main window
     ex = PipeWireSettingsApp()
-    ex.show()
 
-    # Run the application
-    exit_code = app.exec_()
+    # Handle initial window state
+    if args.minimized:
+        # Ensure tray is enabled when starting minimized
+        if not ex.tray_enabled:
+            ex.tray_toggle_checkbox.setChecked(True)
+            ex.toggle_tray_icon(Qt.CheckState.Checked)
+        # Start hidden
+        ex.hide()
+    else:
+        # Show window normally
+        ex.show()
 
-    sys.exit(exit_code)
-
+    # Run the application and exit
+    sys.exit(app.exec())
 
 
 if __name__ == '__main__':

@@ -1,8 +1,8 @@
-#!/usr/bin/env xdg-open
 [Desktop Entry]
+StartupWMClass=cable
 Name=Cable
 Comment=A PyQt5 application to dynamically modify Pipewire and Wireplumber settings
-Exec=cable
+Exec=cable %u
 Icon=jack-plug
 Terminal=false
 Type=Application
