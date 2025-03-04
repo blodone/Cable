@@ -17,6 +17,8 @@ For above, download and place local.cable.Cable.desktop in ~/.local/share/applic
 
 On Arch Linux, install using PKGBUILD or Arch package.
 
+I might be adding testing Debian packages, flatpaks and AppImages.
+
 
 ![](https://github.com/magillos/Cable/blob/main/Cable.png)
 ![](https://github.com/magillos/Cable/blob/main/Cables.png)
