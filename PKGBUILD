@@ -1,13 +1,13 @@
-### Maintainer: Your Name <your.email@example.com>
+### Maintainer:Magillos <your.email@example.com>
 
 pkgname=cable
 pkgver=0.5
 pkgrel=1
-pkgdesc="A PyQt5 application to dynamically modify Pipewire and Wireplumber settings"
+pkgdesc="A PyQt6 application to dynamically modify Pipewire and Wireplumber settings"
 arch=('any')
 url="https://github.com/magillos/Cable"
 license=('GPL-3.0')
-depends=('python' 'python-pyqt5' 'python-jack-client')
+depends=('python' 'python-pyqt6' 'python-jack-client')
 makedepends=('python-setuptools')
 source=(
   "Cable.py::https://raw.githubusercontent.com/magillos/Cable/master/Cable.py"

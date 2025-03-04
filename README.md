@@ -15,7 +15,7 @@ Or use pyinstaller executable from [releases](https://github.com/magillos/Cable/
 
 For above, download and place local.cable.Cable.desktop in ~/.local/share/applications/ directory.
 
-On Arch Linux, install using PKGBUILD or Arch package.
+On Arch Linux, install using PKGBUILD or Arch package. Package is also available on AUR.
 
 I might be adding testing Debian packages, flatpaks and AppImages.
 
