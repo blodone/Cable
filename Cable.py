@@ -79,19 +79,29 @@ class PipeWireSettingsApp(QWidget):
         self.connection_manager_process = None
         self.tray_click_opens_cables = True
         self.profile_index_map = {}
-
-        # Initialize autostart manager with Flatpak environment status
-        self.autostart_manager = AutostartManager(flatpak_env=self.flatpak_env)
-        
-        # Initialize settings flags
+        self.cables_executable_path = None  # Will be set during init
+        self.autostart_manager = AutostartManager(self.flatpak_env)
         self.remember_settings = False
         self.saved_quantum = 0
         self.saved_sample_rate = 0
         self.autostart_enabled = False
-
-        self.initUI()  # Initialize UI first
-        self.load_settings()  # Load settings after UI and attributes are initialized
+        self.quantum_was_reset = False
+        self.sample_rate_was_reset = False
+        
+        # Initialize UI first
+        self.initUI()
+        
+        # Flag to prevent saving during initial load
+        self.initial_load = True
+        
+        # First load current system settings as fallback
         self.load_current_settings()
+        
+        # Then load settings from config, which will override system settings if available
+        self.load_settings()
+        
+        # Now allow saving of user changes
+        self.initial_load = False
 
 
     def get_metadata_value(self, key):
@@ -282,8 +292,8 @@ class PipeWireSettingsApp(QWidget):
 
         self.setLayout(main_layout)
         self.setWindowTitle('Cable')
-        self.setMinimumSize(474, 900)  # Set minimum window size
-        self.resize(454, 820)  # Set initial size to the minimum
+        self.setMinimumSize(300, 600)  # Set minimum window size
+        self.resize(474, 900)  # Set initial size to the minimum
 
         self.load_nodes()
         self.load_devices()
@@ -334,8 +344,22 @@ class PipeWireSettingsApp(QWidget):
                 )
                 # Load audio settings
                 self.remember_settings = config.getboolean('DEFAULT', 'remember_settings', fallback=False)
-                self.saved_quantum = config.getint('DEFAULT', 'saved_quantum', fallback=0)
-                self.saved_sample_rate = config.getint('DEFAULT', 'saved_sample_rate', fallback=0)
+                
+                # Load saved audio settings if they exist
+                has_saved_quantum = 'DEFAULT' in config and 'saved_quantum' in config['DEFAULT']
+                has_saved_sample_rate = 'DEFAULT' in config and 'saved_sample_rate' in config['DEFAULT']
+                
+                if has_saved_quantum:
+                    self.saved_quantum = config.getint('DEFAULT', 'saved_quantum', fallback=0)
+                if has_saved_sample_rate:
+                    self.saved_sample_rate = config.getint('DEFAULT', 'saved_sample_rate', fallback=0)
+                
+                # Only mark settings as not reset if we actually have saved values
+                if has_saved_quantum:
+                    self.quantum_was_reset = False
+                if has_saved_sample_rate:
+                    self.sample_rate_was_reset = False
+                
                 # Load autostart setting
                 self.autostart_enabled = config.getboolean('DEFAULT', 'autostart_enabled', fallback=False)
                 
@@ -365,21 +389,24 @@ class PipeWireSettingsApp(QWidget):
             # Then create a new one with updated settings
             self.toggle_tray_icon(Qt.CheckState.Checked)
 
-        # Apply saved audio settings if enabled
-        if self.remember_settings and self.saved_quantum > 0 and self.saved_sample_rate > 0:
+        # Apply saved audio settings if enabled, but don't save them again during startup
+        if self.remember_settings:
             try:
-                # Set quantum
-                self.quantum_combo.setCurrentText(str(self.saved_quantum))
-                self.apply_quantum_settings()
+                # Only apply saved settings if they exist and are non-zero
+                if self.saved_quantum > 0:
+                    print(f"Applying saved quantum: {self.saved_quantum}")
+                    self.quantum_combo.setCurrentText(str(self.saved_quantum))
+                    self.apply_quantum_settings(skip_save=True)
                 
-                # Set sample rate
-                self.sample_rate_combo.setCurrentText(str(self.saved_sample_rate))
-                self.apply_sample_rate_settings()
+                if self.saved_sample_rate > 0:
+                    print(f"Applying saved sample rate: {self.saved_sample_rate}")
+                    self.sample_rate_combo.setCurrentText(str(self.saved_sample_rate))
+                    self.apply_sample_rate_settings(skip_save=True)
             except Exception as e:
                 print(f"Error applying saved audio settings: {e}")
 
     def save_settings(self):
-        """Save current settings to config file"""
+        """Save UI settings to config file (does not save audio settings)"""
         config = configparser.ConfigParser()
         config_path = os.path.expanduser("~/.config/cable/config.ini")
         
@@ -390,7 +417,7 @@ class PipeWireSettingsApp(QWidget):
         if 'DEFAULT' not in config:
             config['DEFAULT'] = {}
             
-        # Update basic settings
+        # Update UI settings
         config['DEFAULT'].update({
             'tray_enabled': str(self.tray_toggle_checkbox.isChecked()),
             'tray_click_opens_cables': str(self.tray_click_opens_cables),
@@ -398,15 +425,8 @@ class PipeWireSettingsApp(QWidget):
             'autostart_enabled': str(self.autostart_enabled)
         })
         
-        # Only save audio settings if remember_settings is True
-        if self.remember_settings:
-            current_quantum = self.quantum_combo.currentText()
-            current_sample_rate = self.sample_rate_combo.currentText()
-            if current_quantum:
-                config['DEFAULT']['saved_quantum'] = current_quantum
-            if current_sample_rate:
-                config['DEFAULT']['saved_sample_rate'] = current_sample_rate
-            print(f"Saved audio settings - Quantum: {current_quantum}, Sample Rate: {current_sample_rate}")
+        # Note: Audio settings (quantum and sample rate) are now saved separately
+        # in save_quantum_setting() and save_sample_rate_setting() methods
         
         try:
             os.makedirs(os.path.dirname(config_path), exist_ok=True)
@@ -432,13 +452,20 @@ class PipeWireSettingsApp(QWidget):
         
         if remember:
             # Save current settings immediately when enabling
+            config['DEFAULT']['remember_settings'] = 'True'
+            
+            # Save current quantum and sample rate settings, but only if they
+            # weren't explicitly reset or are default values
             current_quantum = self.quantum_combo.currentText()
+            if current_quantum and not self.quantum_was_reset:
+                config['DEFAULT']['saved_quantum'] = current_quantum
+                print(f"Remember settings: Saved quantum {current_quantum}")
+            
             current_sample_rate = self.sample_rate_combo.currentText()
-            config['DEFAULT'].update({
-                'remember_settings': 'True',
-                'saved_quantum': current_quantum if current_quantum else '0',
-                'saved_sample_rate': current_sample_rate if current_sample_rate else '0'
-            })
+            if current_sample_rate and not self.sample_rate_was_reset:
+                config['DEFAULT']['saved_sample_rate'] = current_sample_rate
+                print(f"Remember settings: Saved sample rate {current_sample_rate}")
+                
             print("Audio settings will be remembered and restored on startup")
         else:
             # Remove saved audio settings when disabling
@@ -650,20 +677,47 @@ class PipeWireSettingsApp(QWidget):
 
 
     def closeEvent(self, event):
-        # Override the closeEvent to terminate the connection-manager process
-      #  if self.connection_manager_process and self.connection_manager_process.isVisible(): # Check if process exists and window is visible
-       #     self.connection_manager_process.close()  # Close the connection manager window
+        # If remember settings is enabled, check if we need to save current values
+        if self.remember_settings and not self.initial_load:
+            config = configparser.ConfigParser()
+            config_path = os.path.expanduser("~/.config/cable/config.ini")
+            
+            if os.path.exists(config_path):
+                config.read(config_path)
+                
+                if 'DEFAULT' not in config:
+                    config['DEFAULT'] = {}
+                
+                # Only save non-reset values
+                current_quantum = self.quantum_combo.currentText()
+                if current_quantum and not self.quantum_was_reset:
+                    config['DEFAULT']['saved_quantum'] = current_quantum
+                    print(f"Saving quantum setting on close: {current_quantum}")
+                elif 'saved_quantum' in config['DEFAULT'] and self.quantum_was_reset:
+                    # If quantum was reset and there's a saved value, remove it
+                    del config['DEFAULT']['saved_quantum']
+                    print("Removing saved quantum setting on close due to reset")
+                
+                current_sample_rate = self.sample_rate_combo.currentText()
+                if current_sample_rate and not self.sample_rate_was_reset:
+                    config['DEFAULT']['saved_sample_rate'] = current_sample_rate
+                    print(f"Saving sample rate setting on close: {current_sample_rate}")
+                elif 'saved_sample_rate' in config['DEFAULT'] and self.sample_rate_was_reset:
+                    # If sample rate was reset and there's a saved value, remove it
+                    del config['DEFAULT']['saved_sample_rate']
+                    print("Removing saved sample rate setting on close due to reset")
+                
+                try:
+                    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+                    with open(config_path, 'w') as configfile:
+                        config.write(configfile)
+                except Exception as e:
+                    print(f"Error saving settings on close: {e}")
 
         # Handle the tray icon and other close events as before
         if self.tray_enabled and self.tray_icon:
             event.ignore()
             self.hide()
-         #   self.tray_icon.showMessage(
-         #       "Cable",
-         #       "Application was minimized to the system tray",
-         #       QSystemTrayIcon.MessageIcon.Information,
-         #       1500
-         #   )
         else:
             event.accept()
 
@@ -782,6 +836,29 @@ class PipeWireSettingsApp(QWidget):
         # Clear profile and latency input
         self.profile_combo.clear()
         self.latency_input.clear()
+
+        # If remember settings is enabled and we have saved values, restore them
+        # without triggering saves
+        if self.remember_settings:
+            config = configparser.ConfigParser()
+            config_path = os.path.expanduser("~/.config/cable/config.ini")
+            
+            if os.path.exists(config_path):
+                try:
+                    config.read(config_path)
+                    
+                    if 'DEFAULT' in config:
+                        if 'saved_quantum' in config['DEFAULT']:
+                            quantum = config['DEFAULT']['saved_quantum']
+                            self.quantum_combo.setCurrentText(quantum)
+                            self.apply_quantum_settings(skip_save=True)
+                            
+                        if 'saved_sample_rate' in config['DEFAULT']:
+                            sample_rate = config['DEFAULT']['saved_sample_rate']
+                            self.sample_rate_combo.setCurrentText(sample_rate)
+                            self.apply_sample_rate_settings(skip_save=True)
+                except Exception as e:
+                    print(f"Error restoring saved settings during reload: {e}")
 
        # QMessageBox.information(self, "Reload Complete", "Application settings have been reloaded.")
 
@@ -1004,7 +1081,7 @@ class PipeWireSettingsApp(QWidget):
         except Exception as e:
             print(f"Error applying profile: {e}")
 
-    def apply_quantum_settings(self):
+    def apply_quantum_settings(self, skip_save=False):
         quantum_value = self.quantum_combo.currentText()
         try:
             self.run_command([
@@ -1015,11 +1092,47 @@ class PipeWireSettingsApp(QWidget):
             ], check_output=False)
             print(f"Applied quantum/buffer setting: {quantum_value}")
             
-            # Save settings if remember settings is enabled
-            if self.remember_settings_checkbox.isChecked():
-                self.save_settings()
+            # Clear the reset flag since we're explicitly applying a setting
+            # But only if we're not in initial load
+            if not self.initial_load:
+                self.quantum_was_reset = False
+            
+            # Save only quantum setting if remember settings is enabled, we're not skipping save,
+            # and we're not in initial load
+            if self.remember_settings_checkbox.isChecked() and not skip_save and not self.initial_load:
+                self.save_quantum_setting()
         except Exception as e:
             print(f"Error applying quantum: {e}")
+
+    def save_quantum_setting(self):
+        """Save only the quantum setting to config file"""
+        # Don't save if we've explicitly reset the value and haven't changed it
+        if self.quantum_was_reset:
+            print("Skipping save of quantum setting after reset")
+            return
+            
+        config = configparser.ConfigParser()
+        config_path = os.path.expanduser("~/.config/cable/config.ini")
+        
+        # Load existing config if it exists
+        if os.path.exists(config_path):
+            config.read(config_path)
+            
+        if 'DEFAULT' not in config:
+            config['DEFAULT'] = {}
+            
+        # Save only the quantum setting
+        current_quantum = self.quantum_combo.currentText()
+        if current_quantum:
+            config['DEFAULT']['saved_quantum'] = current_quantum
+            print(f"Saved quantum setting: {current_quantum}")
+        
+        try:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, 'w') as configfile:
+                config.write(configfile)
+        except Exception as e:
+            print(f"Error saving quantum setting: {e}")
 
     def reset_quantum_settings(self):
         try:
@@ -1036,6 +1149,9 @@ class PipeWireSettingsApp(QWidget):
             )
             print("Reset quantum/buffer setting to default")
             
+            # Set the reset flag to prevent saving default values
+            self.quantum_was_reset = True
+            
             # Remove saved_quantum from config if it exists
             config = configparser.ConfigParser()
             config_path = os.path.expanduser("~/.config/cable/config.ini")
@@ -1047,6 +1163,7 @@ class PipeWireSettingsApp(QWidget):
                         config.write(configfile)
                     print("Removed saved quantum setting from config")
             
+            # Reload current settings but don't save them
             self.load_current_settings()
         except subprocess.CalledProcessError as e:
             print(f"Reset quantum failed: {e.stderr.decode()}")
@@ -1060,7 +1177,7 @@ class PipeWireSettingsApp(QWidget):
         except Exception as e:
             print(f"Error modifying config: {e}")
 
-    def apply_sample_rate_settings(self):
+    def apply_sample_rate_settings(self, skip_save=False):
         sample_rate = self.sample_rate_combo.currentText()
         try:
             self.run_command([
@@ -1071,11 +1188,47 @@ class PipeWireSettingsApp(QWidget):
             ], check_output=False)
             print(f"Applied sample rate setting: {sample_rate}")
             
-            # Save settings if remember settings is enabled
-            if self.remember_settings_checkbox.isChecked():
-                self.save_settings()
+            # Clear the reset flag since we're explicitly applying a setting
+            # But only if we're not in initial load
+            if not self.initial_load:
+                self.sample_rate_was_reset = False
+            
+            # Save only sample rate setting if remember settings is enabled, we're not skipping save,
+            # and we're not in initial load
+            if self.remember_settings_checkbox.isChecked() and not skip_save and not self.initial_load:
+                self.save_sample_rate_setting()
         except Exception as e:
             print(f"Error applying sample rate: {e}")
+
+    def save_sample_rate_setting(self):
+        """Save only the sample rate setting to config file"""
+        # Don't save if we've explicitly reset the value and haven't changed it
+        if self.sample_rate_was_reset:
+            print("Skipping save of sample rate setting after reset")
+            return
+            
+        config = configparser.ConfigParser()
+        config_path = os.path.expanduser("~/.config/cable/config.ini")
+        
+        # Load existing config if it exists
+        if os.path.exists(config_path):
+            config.read(config_path)
+            
+        if 'DEFAULT' not in config:
+            config['DEFAULT'] = {}
+            
+        # Save only the sample rate setting
+        current_sample_rate = self.sample_rate_combo.currentText()
+        if current_sample_rate:
+            config['DEFAULT']['saved_sample_rate'] = current_sample_rate
+            print(f"Saved sample rate setting: {current_sample_rate}")
+        
+        try:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, 'w') as configfile:
+                config.write(configfile)
+        except Exception as e:
+            print(f"Error saving sample rate setting: {e}")
 
     def reset_sample_rate_settings(self):
         try:
@@ -1092,6 +1245,9 @@ class PipeWireSettingsApp(QWidget):
             )
             print("Reset sample rate setting to default")
             
+            # Set the reset flag to prevent saving default values
+            self.sample_rate_was_reset = True
+            
             # Remove saved_sample_rate from config if it exists
             config = configparser.ConfigParser()
             config_path = os.path.expanduser("~/.config/cable/config.ini")
@@ -1103,6 +1259,7 @@ class PipeWireSettingsApp(QWidget):
                         config.write(configfile)
                     print("Removed saved sample rate setting from config")
             
+            # Reload current settings but don't save them
             self.load_current_settings()
         except subprocess.CalledProcessError as e:
             print(f"Reset sample rate failed: {e.stderr.decode()}")
@@ -1118,6 +1275,25 @@ class PipeWireSettingsApp(QWidget):
 
     def load_current_settings(self):
         try:
+            # If during startup, don't try to check for saved values yet
+            if not hasattr(self, 'initial_load') or not self.initial_load:
+                # If remember settings is enabled and we have saved values, don't override them
+                if self.remember_settings:
+                    config = configparser.ConfigParser()
+                    config_path = os.path.expanduser("~/.config/cable/config.ini")
+                    
+                    if os.path.exists(config_path):
+                        config.read(config_path)
+                        has_saved_quantum = 'DEFAULT' in config and 'saved_quantum' in config['DEFAULT']
+                        has_saved_sample_rate = 'DEFAULT' in config and 'saved_sample_rate' in config['DEFAULT']
+                        
+                        # If we have both saved settings, don't load from system
+                        if has_saved_quantum and has_saved_sample_rate:
+                            # Settings will be loaded from config in load_settings() method
+                            print("Using saved settings from config instead of current system settings")
+                            return
+            
+            # Get current system values
             # Get sample rate
             forced_rate = self.get_metadata_value('clock.force-rate')
             if forced_rate in (None, "0"):
@@ -1131,23 +1307,46 @@ class PipeWireSettingsApp(QWidget):
                 quantum = self.get_metadata_value('clock.quantum')
             else:
                 quantum = forced_quantum
+                
+            # Check if we're loading system defaults and set the reset flags accordingly
+            # When we load the default values, mark them as "reset" so they don't get
+            # automatically saved back to config
+            if forced_quantum in (None, "0"):
+                self.quantum_was_reset = True
+                print("Loading default quantum value from system, marked as reset")
+                
+            if forced_rate in (None, "0"):
+                self.sample_rate_was_reset = True
+                print("Loading default sample rate value from system, marked as reset")
 
-            # Update UI elements
+            # Update UI elements without triggering save operations
             if sample_rate:
+                # Signal blockage to prevent unintended signal emissions
+                prev_block_state = self.sample_rate_combo.blockSignals(True)
+                
                 index = self.sample_rate_combo.findText(sample_rate)
                 if index >= 0:
                     self.sample_rate_combo.setCurrentIndex(index)
                 else:
                     self.sample_rate_combo.addItem(sample_rate)
                     self.sample_rate_combo.setCurrentText(sample_rate)
+                
+                # Restore previous signal block state
+                self.sample_rate_combo.blockSignals(prev_block_state)
 
             if quantum:
+                # Signal blockage to prevent unintended signal emissions
+                prev_block_state = self.quantum_combo.blockSignals(True)
+                
                 index = self.quantum_combo.findText(quantum)
                 if index >= 0:
                     self.quantum_combo.setCurrentIndex(index)
                 else:
                     self.quantum_combo.addItem(quantum)
                     self.quantum_combo.setCurrentText(quantum)
+                
+                # Restore previous signal block state
+                self.quantum_combo.blockSignals(prev_block_state)
 
             self.update_latency_display()
 
