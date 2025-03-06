@@ -64,7 +64,7 @@ class CableApp(QApplication):
 
         # Set the desktop filename for Wayland
         # This needs to match your .desktop file name exactly
-        QGuiApplication.setDesktopFileName("com.example.cable")
+        QGuiApplication.setDesktopFileName("local.cable.Cable")
 
 
         # Set the application name to match the .desktop file
