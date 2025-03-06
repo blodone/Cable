@@ -11,7 +11,7 @@ depends=('python' 'python-pyqt6' 'python-jack-client')
 makedepends=('python-setuptools')
 source=("cable-$pkgver.tar.gz::https://github.com/magillos/Cable/archive/refs/tags/$pkgver.tar.gz")
 
-sha256sums=('f90115c71323cb287ca9cb6bc316cfd26337404770bd8e407d9a86cbba490dff')
+sha256sums=('ab407b30460603584a37a8410801026a8bafc6b197fcf132b359b4587f3a16d6')
 
 
 
