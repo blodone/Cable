@@ -54,7 +54,7 @@ class ConfigManager:
         return self.config['DEFAULT'].getboolean(key, default)
 
     def set_bool(self, key, value):
-        self.config['DEFAULT'][key] = str(value)
+        self.config['DEFAULT'][key] = 'true' if value else 'false'
         self.save_config()
 
 
@@ -447,7 +447,7 @@ class JackConnectionManager(QMainWindow):
         self.refresh_ports()
 
     def toggle_auto_refresh(self, state):
-        is_checked = state == Qt.CheckState.Checked
+        is_checked = int(state) == 2  # Qt.CheckState.Checked equals 2
         if is_checked:
             self.timer.start(1000)
         else:
