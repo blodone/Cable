@@ -1,0 +1,9 @@
+[Desktop Entry]
+StartupWMClass=cable
+Name=Cable
+Comment=Dynamically modify Pipewire and Wireplumber settings
+Exec=cable %u
+Icon=jack-plug
+Terminal=false
+Type=Application
+Categories=Utility;

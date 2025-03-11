@@ -15,13 +15,14 @@ Or use pyinstaller executable from [releases](https://github.com/magillos/Cable/
 
 For above, download and place local.cable.Cable.desktop in ~/.local/share/applications/ directory.
 
-On Arch Linux, install using PKGBUILD or Arch package. Package is also available on AUR.
+On Arch Linux, install using PKGBUILD or Arch package. App is also available on AUR.
 
-I might be adding testing Debian packages, flatpaks and AppImages.
 
 
 ![](https://github.com/magillos/Cable/blob/main/Cable.png)
 ![](https://github.com/magillos/Cable/blob/main/Cables.png)
+![](https://github.com/magillos/Cable/blob/main/pw-top.png)
+
 
 Icon comes from [here](https://game-icons.net/1x1/delapouite/jack-plug.html) and is licenced under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
 The app was made with heavy usage of various LLMs.

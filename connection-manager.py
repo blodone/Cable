@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
                              QGraphicsPathItem, QCheckBox, QMenu, QSizePolicy, QSpacerItem,
-                             QButtonGroup)
-from PyQt6.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect
+                             QButtonGroup, QTextEdit)
+from PyQt6.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect, QProcess
 from PyQt6.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
                          QPainterPath, QFontMetrics, QFont, QAction) # Moved QAction to QtGui import
 import jack
@@ -276,6 +276,11 @@ class JackConnectionManager(QMainWindow):
         self.connection_history = ConnectionHistory()
         self.dark_mode = self.is_dark_mode()
         self.setup_colors()
+        
+        # Initialize process for pw-top and output buffer
+        self.pw_process = None
+        self.pwtop_buffer = ""  # Buffer to store pw-top output
+        self.last_complete_cycle = None  # Store last complete cycle
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -286,16 +291,19 @@ class JackConnectionManager(QMainWindow):
 
         self.audio_tab_widget = QWidget()
         self.midi_tab_widget = QWidget()
+        self.pwtop_tab_widget = QWidget()
 
         self.setup_port_tab(self.audio_tab_widget, "Audio", 'audio')
         self.setup_port_tab(self.midi_tab_widget, "MIDI", 'midi')
+        self.setup_pwtop_tab(self.pwtop_tab_widget)
 
         self.tab_widget.addTab(self.audio_tab_widget, "Audio")
         self.tab_widget.addTab(self.midi_tab_widget, "MIDI")
+        self.tab_widget.addTab(self.pwtop_tab_widget, "pw-top")
         self.tab_widget.currentChanged.connect(self.switch_tab)
 
         self.setup_bottom_layout(main_layout)
-
+        
         # Initialize the startup refresh timer
         self.startup_refresh_timer = QTimer()
         self.startup_refresh_timer.timeout.connect(self.startup_refresh)
@@ -319,6 +327,104 @@ class JackConnectionManager(QMainWindow):
             # After quick refresh burst, start normal auto-refresh if enabled
             if self.auto_refresh_checkbox.isChecked():
                 self.timer.start(1000)
+
+    def setup_pwtop_tab(self, tab_widget):
+        """Set up the pw-top statistics tab"""
+        layout = QVBoxLayout(tab_widget)
+        
+        # Create text display widget
+        self.pwtop_text = QTextEdit()
+        self.pwtop_text.setReadOnly(True)
+        self.pwtop_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {self.background_color.name()};
+                color: {self.text_color.name()};
+                font-family: monospace;
+                font-size: 13pt;
+            }}
+        """)
+        
+        layout.addWidget(self.pwtop_text)
+        
+        # Start pw-top process when tab is created
+        self.start_pwtop_process()
+
+    def start_pwtop_process(self):
+        """Start the pw-top process in batch mode"""
+        if self.pw_process is None:
+            self.pw_process = QProcess()
+            self.pw_process.setProgram("pw-top")
+            self.pw_process.setArguments(["-b"])
+            self.pw_process.readyReadStandardOutput.connect(self.handle_pwtop_output)
+            self.pw_process.start()
+
+    def stop_pwtop_process(self):
+        """Stop the pw-top process"""
+        if self.pw_process is not None:
+            self.pw_process.kill()
+            self.pw_process.waitForFinished()
+            self.pw_process = None
+            
+    def handle_pwtop_output(self):
+        """Handle new output from pw-top"""
+        if self.pw_process is not None:
+            data = self.pw_process.readAllStandardOutput().data().decode()
+            if data:
+                # Append new data to buffer
+                self.pwtop_buffer += data
+                
+                # Extract complete cycle
+                complete_cycle = self.extract_latest_complete_cycle()
+                
+                # Update our stored complete cycle if we found a new one
+                if complete_cycle:
+                    self.last_complete_cycle = complete_cycle
+                
+                # Always display the latest known complete cycle
+                if self.last_complete_cycle:
+                    self.pwtop_text.setText(self.last_complete_cycle)
+                    # Keep cursor at the top to maintain stable view
+                    self.pwtop_text.verticalScrollBar().setValue(0)
+                
+                # Limit buffer size to prevent memory issues
+                if len(self.pwtop_buffer) > 10000:
+                    self.pwtop_buffer = self.pwtop_buffer[-5000:]
+
+    def extract_latest_complete_cycle(self):
+        """Extract the latest complete cycle from the pw-top output buffer"""
+        import re
+        
+        # Pattern to identify the header row that starts each cycle
+        header_pattern = r'S\s+ID\s+QUANT\s+RATE\s+WAIT\s+BUSY\s+W/Q\s+B/Q\s+ERR FORMAT\s+NAME'
+        
+        # Find all occurrences of the header pattern
+        matches = list(re.finditer(header_pattern, self.pwtop_buffer))
+        
+        if len(matches) < 2:
+            # Need at least two headers to identify a complete cycle
+            return None
+        
+        # Extract text between the second-last and last header
+        # This should be a complete cycle
+        second_last_idx = len(matches) - 2
+        last_idx = len(matches) - 1
+        
+        start_pos = matches[second_last_idx].start()
+        end_pos = matches[last_idx].start()
+        
+        # Extract the complete cycle and verify it has enough content
+        cycle = self.pwtop_buffer[start_pos:end_pos]
+        
+        # Verify it's a complete cycle (has at least 10 lines)
+        if cycle.count('\n') < 10:
+            return None
+            
+        return cycle
+
+    def update_pwtop_output(self):
+        """Handle pw-top output updates"""
+        if self.pw_process is not None:
+            self.handle_pwtop_output()
 
     def setup_port_tab(self, tab_widget, tab_name, port_type):
         layout = QVBoxLayout(tab_widget)
@@ -443,8 +549,14 @@ class JackConnectionManager(QMainWindow):
 
 
     def switch_tab(self, index):
-        self.port_type = 'audio' if index == 0 else 'midi'
-        self.refresh_ports()
+        if index < 2:  # Audio or MIDI tabs
+            if hasattr(self, 'pw_process') and self.pw_process is not None:
+                self.stop_pwtop_process()  # Stop pw-top when switching away
+            self.port_type = 'audio' if index == 0 else 'midi'
+            self.refresh_ports()
+        elif index == 2:  # PipeWire Stats tab
+            if self.pw_process is None:
+                self.start_pwtop_process()
 
     def toggle_auto_refresh(self, state):
         is_checked = int(state) == 2  # Qt.CheckState.Checked equals 2
@@ -922,6 +1034,10 @@ class JackConnectionManager(QMainWindow):
             connect_button.setEnabled(False) # Disable connect if no items selected
 
     def closeEvent(self, event):
+        # Stop pw-top process before closing
+        if hasattr(self, 'pw_process') and self.pw_process is not None:
+            self.stop_pwtop_process()
+            
         if self.minimize_on_close:
             event.ignore()
             self.hide() # Minimize to tray instead of closing
