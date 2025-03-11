@@ -14,7 +14,7 @@ if [ -n "${USE_LOCAL}" ]; then
   sha256sums=('SKIP')
 else
   source=("cable-$pkgver.tar.gz::https://github.com/magillos/Cable/archive/refs/tags/$pkgver.tar.gz")
-  sha256sums=('ab407b30460603584a37a8410801026a8bafc6b197fcf132b359b4587f3a16d6')
+  sha256sums=('58504009486618969d6930dda3696744efd69669009c9a680382572fe10d0b03')
 fi
 
 
