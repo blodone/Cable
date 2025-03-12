@@ -277,6 +277,9 @@ class JackConnectionManager(QMainWindow):
         self.dark_mode = self.is_dark_mode()
         self.setup_colors()
         
+        # Detect Flatpak environment
+        self.flatpak_env = os.path.exists('/.flatpak-info')
+        
         # Initialize process for pw-top and output buffer
         self.pw_process = None
         self.pwtop_buffer = ""  # Buffer to store pw-top output
@@ -353,16 +356,36 @@ class JackConnectionManager(QMainWindow):
         """Start the pw-top process in batch mode"""
         if self.pw_process is None:
             self.pw_process = QProcess()
-            self.pw_process.setProgram("pw-top")
-            self.pw_process.setArguments(["-b"])
+            
+            if self.flatpak_env:
+                self.pw_process.setProgram("flatpak-spawn")
+                self.pw_process.setArguments(["--host", "pw-top", "-b"])
+            else:
+                self.pw_process.setProgram("pw-top")
+                self.pw_process.setArguments(["-b"])
+                
             self.pw_process.readyReadStandardOutput.connect(self.handle_pwtop_output)
+            self.pw_process.errorOccurred.connect(self.handle_pwtop_error)
+            self.pw_process.finished.connect(self.handle_pwtop_finished)
             self.pw_process.start()
 
     def stop_pwtop_process(self):
         """Stop the pw-top process"""
         if self.pw_process is not None:
-            self.pw_process.kill()
-            self.pw_process.waitForFinished()
+            # Close process standard I/O channels
+            self.pw_process.closeReadChannel(QProcess.ProcessChannel.StandardOutput)
+            self.pw_process.closeReadChannel(QProcess.ProcessChannel.StandardError)
+            self.pw_process.closeWriteChannel()
+            
+            # Terminate gracefully first
+            self.pw_process.terminate()
+            
+            # Give it some time to terminate gracefully
+            if not self.pw_process.waitForFinished(1000):
+                # Force kill if it doesn't terminate
+                self.pw_process.kill()
+                self.pw_process.waitForFinished()
+            
             self.pw_process = None
             
     def handle_pwtop_output(self):
@@ -390,36 +413,43 @@ class JackConnectionManager(QMainWindow):
                 if len(self.pwtop_buffer) > 10000:
                     self.pwtop_buffer = self.pwtop_buffer[-5000:]
 
+    def handle_pwtop_error(self, error):
+        """Handle pw-top process errors"""
+        print(f"pw-top process error: {error}")
+
+    def handle_pwtop_finished(self, exit_code, exit_status):
+        """Handle pw-top process completion"""
+        print(f"pw-top process finished - Exit code: {exit_code}, Status: {exit_status}")
+
     def extract_latest_complete_cycle(self):
         """Extract the latest complete cycle from the pw-top output buffer"""
-        import re
+        lines = self.pwtop_buffer.split('\n')
         
-        # Pattern to identify the header row that starts each cycle
-        header_pattern = r'S\s+ID\s+QUANT\s+RATE\s+WAIT\s+BUSY\s+W/Q\s+B/Q\s+ERR FORMAT\s+NAME'
+        # Find all lines that start with 'S' and contain 'ID' and 'NAME'
+        header_indices = [
+            i for i, line in enumerate(lines)
+            if line.startswith('S') and 'ID' in line and 'NAME' in line
+        ]
         
-        # Find all occurrences of the header pattern
-        matches = list(re.finditer(header_pattern, self.pwtop_buffer))
+        # Keep buffer size manageable by removing old data
+        if len(header_indices) > 2:
+            keep_from_line = header_indices[-2]  # Keep last 2 cycles
+            self.pwtop_buffer = '\n'.join(lines[keep_from_line:])
         
-        if len(matches) < 2:
-            # Need at least two headers to identify a complete cycle
-            return None
-        
-        # Extract text between the second-last and last header
-        # This should be a complete cycle
-        second_last_idx = len(matches) - 2
-        last_idx = len(matches) - 1
-        
-        start_pos = matches[second_last_idx].start()
-        end_pos = matches[last_idx].start()
-        
-        # Extract the complete cycle and verify it has enough content
-        cycle = self.pwtop_buffer[start_pos:end_pos]
-        
-        # Verify it's a complete cycle (has at least 10 lines)
-        if cycle.count('\n') < 10:
+        # Need at least 2 headers to identify a complete cycle
+        if len(header_indices) < 2:
             return None
             
-        return cycle
+        # Extract section between last two headers
+        start_idx = header_indices[-2]
+        end_idx = header_indices[-1]
+        section = lines[start_idx:end_idx]
+        
+        # Basic validation - should have some minimum content
+        if len(section) < 3:
+            return None
+            
+        return '\n'.join(section)
 
     def update_pwtop_output(self):
         """Handle pw-top output updates"""
@@ -1037,19 +1067,68 @@ class JackConnectionManager(QMainWindow):
         # Stop pw-top process before closing
         if hasattr(self, 'pw_process') and self.pw_process is not None:
             self.stop_pwtop_process()
-            
+
+        # Stop the timer if it's running
+        if hasattr(self, 'timer'):
+            self.timer.stop()
+        
+        if hasattr(self, 'startup_refresh_timer'):
+            self.startup_refresh_timer.stop()
+
+        # Clean up JACK client
+        if hasattr(self, 'client'):
+            self.client.deactivate()
+            self.client.close()
+
+        # When running standalone (not as part of Cable), always close properly
+        if __name__ == '__main__':
+            self.minimize_on_close = False
+        
+        # Handle window closing behavior
         if self.minimize_on_close:
             event.ignore()
             self.hide() # Minimize to tray instead of closing
         else:
             event.accept()
+            QApplication.quit()
 
 
 def main():
     app = QApplication(sys.argv)
     window = JackConnectionManager()
     window.show()
-    sys.exit(app.exec())
+    
+    # Handle Ctrl+C gracefully
+    import signal
+    def signal_handler(signum, frame):
+        print("Received signal to terminate")
+        window.close()
+        app.quit()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Use timer to allow Python interpreter to process signals
+    timer = QTimer()
+    timer.timeout.connect(lambda: None)
+    timer.start(100)
+    
+    # Start Qt event loop with exception handling
+    try:
+        return app.exec()
+    except KeyboardInterrupt:
+        print("Received keyboard interrupt")
+        window.close()
+        app.quit()
+        return 1
+    finally:
+        # Ensure cleanup happens
+        if window.pw_process is not None:
+            window.stop_pwtop_process()
+        if hasattr(window, 'client'):
+            window.client.deactivate()
+            window.client.close()
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
