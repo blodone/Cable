@@ -7,7 +7,7 @@ import dbus
 import configparser
 import argparse
 import shutil
-from PyQt6.QtCore import Qt, QTimer, QFile, QMargins
+from PyQt6.QtCore import Qt, QTimer, QFile, QMargins, QProcess
 from PyQt6.QtGui import QFont, QIcon, QGuiApplication, QActionGroup, QAction
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QLineEdit, QPushButton, QLabel,
@@ -603,78 +603,116 @@ class PipeWireSettingsApp(QWidget):
         self.save_settings()
 
 
-    def handle_show_action(self): # New handler function
+    def handle_show_action(self):
+        """Show the main Cable window"""
         if not self.isVisible():
-            self.show() # PyQt6: showNormal() is now show() for restoring
+            self.show()  # PyQt6: showNormal() is now show() for restoring
             self.activateWindow()
 
-    def handle_cables_action(self): # New handler for Cables menu
-        if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
+    def handle_cables_action(self):
+        """Handle selection of 'Cables' from tray menu"""
+        if self.connection_manager_process is None or (
+            hasattr(self.connection_manager_process, 'state') and 
+            self.connection_manager_process.state() == QProcess.ProcessState.NotRunning
+        ):
             # If Cables app is not running, launch it
             self.launch_connection_manager()
-        # else: Cables app is already running, do nothing
+        else:
+            # As a workaround, kill and restart it to bring to front
+            print("Connection manager process already running, bringing to front")
+            self.connection_manager_process.terminate()
+            # Wait a brief moment for termination
+            QTimer.singleShot(500, self.launch_connection_manager)
 
-
-    def open_cables(self): # open_cables is now only used by the button in main app
-        if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
+    def open_cables(self):
+        """Open the Cables window (used by main app button)"""
+        if self.connection_manager_process is None or (
+            hasattr(self.connection_manager_process, 'state') and 
+            self.connection_manager_process.state() == QProcess.ProcessState.NotRunning
+        ):
             # If Cables app is not running, launch it
             self.launch_connection_manager()
-        # else: Cables app is already running, do nothing
-
+        else:
+            # Process is already running, we need to signal it somehow
+            # As a workaround, kill and restart it to bring to front
+            print("Connection manager process already running, bringing to front")
+            self.connection_manager_process.terminate()
+            # Wait a brief moment for termination
+            QTimer.singleShot(500, self.launch_connection_manager)
 
     def tray_icon_activated(self, reason):
-     if reason == QSystemTrayIcon.ActivationReason.Trigger:  # Left click
-        if self.tray_click_opens_cables: # Check the toggle
-            if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
-                # If Cables app is not running, launch it
-                self.launch_connection_manager()
-            else:
-                if self.connection_manager_process.isMinimized() or not self.connection_manager_process.isVisible():
-                    self.connection_manager_process.show() # PyQt6: showNormal() is now show() for restoring
-                    self.connection_manager_process.activateWindow()
+        """Handle tray icon activation (clicks)"""
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:  # Left click
+            if self.tray_click_opens_cables:  # Check the toggle
+                if self.connection_manager_process is None or (
+                    hasattr(self.connection_manager_process, 'state') and 
+                    self.connection_manager_process.state() == QProcess.ProcessState.NotRunning
+                ):
+                    # If Cables app is not running at all, launch it
+                    self.launch_connection_manager()
                 else:
-                    self.connection_manager_process.hide()
-        else:
-            if self.isMinimized() or not self.isVisible():
-                self.show()  # Restore window if minimized # PyQt6: showNormal() is now show() for restoring
-                self.activateWindow()  # Bring window to the front
+                    # Process is already running, just terminate it (toggle behavior)
+                    print("Connection manager is already running, closing it")
+                    self.connection_manager_process.terminate()
+                    # Don't schedule a relaunch
             else:
-                self.hide()  # Minimize to tray
-
+                if self.isMinimized() or not self.isVisible():
+                    self.show()  # Restore window if minimized
+                    self.activateWindow()  # Bring window to the front
+                else:
+                    self.hide()  # Minimize to tray
 
     def launch_connection_manager(self):
+        """Launch connection-manager.py as an independent process to avoid JACK errors in the main process"""
         try:
-            # Import the connection manager module
-            import importlib.util
-            import os
-
             # Define possible paths
             possible_paths = [
                 os.path.join(sys._MEIPASS, 'connection-manager.py') if getattr(sys, 'frozen', False) else None,  # PyInstaller bundle path
                 os.path.join(os.path.dirname(os.path.abspath(__file__)), 'connection-manager.py'),  # Same directory
                 '/usr/share/cable/connection-manager.py'  # System installation path
             ]
-
+            
             # Find first existing path
             module_path = next((path for path in possible_paths if path and os.path.exists(path)), None)
-
             if not module_path:
                 raise FileNotFoundError("Could not find connection-manager.py in any of the expected locations")
 
-            spec = importlib.util.spec_from_file_location("connection_manager", module_path)
-            connection_manager = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(connection_manager)
-
-            # Create and show the connection manager window
-            if self.connection_manager_process is None or not self.connection_manager_process.isVisible():
-                self.connection_manager_process = connection_manager.JackConnectionManager()
-                self.connection_manager_process.show()
+            # Create a QProcess for running connection-manager.py if it's not already running
+            if self.connection_manager_process is None:
+                self.connection_manager_process = QProcess()
+                
+                # Connect signals to handle process state
+                self.connection_manager_process.finished.connect(self.on_connection_manager_closed)
+                
+                # Set up the command
+                if self.flatpak_env:
+                    # In Flatpak, we need to use flatpak-spawn to run the Python interpreter
+                    self.connection_manager_process.setProgram('flatpak-spawn')
+                    self.connection_manager_process.setArguments(['--host', 'python3', module_path])
+                else:
+                    # Normal execution
+                    self.connection_manager_process.setProgram('python3')
+                    self.connection_manager_process.setArguments([module_path])
+                
+                # Start the process
+                self.connection_manager_process.start()
+                print(f"Started connection manager as separate process using {module_path}")
             else:
-                self.connection_manager_process.activateWindow()
-
+                # Process exists but it might be terminated
+                if self.connection_manager_process.state() == QProcess.ProcessState.NotRunning:
+                    # Restart the process
+                    self.connection_manager_process.start()
+                    print("Restarting connection manager process")
+                else:
+                    print("Connection manager process already running")
         except Exception as e:
             print(f"Error launching connection manager: {e}")
-
+    
+    def on_connection_manager_closed(self, exitCode, exitStatus):
+        """Handle the connection manager process closing"""
+        print(f"Connection manager process exited with code {exitCode}, status {exitStatus}")
+        # Reset the process object so we can create a new one next time
+        self.connection_manager_process = None
 
     def closeEvent(self, event):
         # If remember settings is enabled, check if we need to save current values
@@ -713,7 +751,6 @@ class PipeWireSettingsApp(QWidget):
                         config.write(configfile)
                 except Exception as e:
                     print(f"Error saving settings on close: {e}")
-
         # Handle the tray icon and other close events as before
         if self.tray_enabled and self.tray_icon:
             event.ignore()
@@ -730,8 +767,11 @@ class PipeWireSettingsApp(QWidget):
         try:
             quantum = int(self.quantum_combo.currentText())
             sample_rate = int(self.sample_rate_combo.currentText())
-            latency_ms = quantum / sample_rate * 1000
-            self.latency_display_value.setText(f"{latency_ms:.2f} ms")
+            if sample_rate == 0:
+                self.latency_display_value.setText("N/A")
+            else:
+                latency_ms = quantum / sample_rate * 1000
+                self.latency_display_value.setText(f"{latency_ms:.2f} ms")
         except ValueError:
             self.latency_display_value.setText("N/A")
 
@@ -742,6 +782,7 @@ class PipeWireSettingsApp(QWidget):
                 font-weight: bold;
             }
         """)
+
     def confirm_restart_wireplumber(self):
         reply = QMessageBox.question(self, 'Confirm Restart',
                                      "Are you sure you want to restart Wireplumber?",
@@ -764,7 +805,6 @@ class PipeWireSettingsApp(QWidget):
             manager.RestartUnit('wireplumber.service', 'replace') # Use service name without --user
             QMessageBox.information(self, "Success", "Wireplumber restarted successfully")
             self.reload_app_settings()
-
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name()
             error_message = str(e)
@@ -775,18 +815,17 @@ class PipeWireSettingsApp(QWidget):
                                      "This might be due to Flatpak sandboxing restrictions.\n"
                                      f"Details: {error_message}")
             elif "org.freedesktop.systemd1.Error.UnitNotFound" in error_name:
-                 QMessageBox.critical(self, "Error",
+                QMessageBox.critical(self, "Error",
                                      "Error restarting Wireplumber: Wireplumber user service not found.\n"
                                      "Ensure Wireplumber is installed and the user service is enabled.\n"
                                      f"Details: {error_message}")
             elif "org.freedesktop.systemd1.Error.Failed" in error_name:
-                 QMessageBox.critical(self, "Error",
+                QMessageBox.critical(self, "Error",
                                      "Error restarting Wireplumber: Restart operation failed.\n"
                                      "Check Wireplumber logs for more details.\n"
                                      f"Details: {error_message}")
             else: # General DBus error
                 QMessageBox.critical(self, "Error", f"Error restarting Wireplumber: {error_message}")
-
 
     def restart_pipewire(self):
         try:
@@ -807,12 +846,12 @@ class PipeWireSettingsApp(QWidget):
                                      "This might be due to Flatpak sandboxing restrictions.\n"
                                      f"Details: {error_message}")
             elif "org.freedesktop.systemd1.Error.UnitNotFound" in error_name:
-                 QMessageBox.critical(self, "Error",
+                QMessageBox.critical(self, "Error",
                                      "Error restarting Pipewire: Pipewire user service not found.\n"
                                      "Ensure Pipewire is installed and the user service is enabled.\n"
                                      f"Details: {error_message}")
             elif "org.freedesktop.systemd1.Error.Failed" in error_name:
-                 QMessageBox.critical(self, "Error",
+                QMessageBox.critical(self, "Error",
                                      "Error restarting Pipewire: Restart operation failed.\n"
                                      "Check Pipewire logs for more details.\n"
                                      f"Details: {error_message}")
@@ -828,15 +867,15 @@ class PipeWireSettingsApp(QWidget):
         self.load_current_settings()
         self.load_devices()
         self.load_nodes()
-
+        
         # Reset device and node selections
         self.device_combo.setCurrentIndex(0)
         self.node_combo.setCurrentIndex(0)
-
+        
         # Clear profile and latency input
         self.profile_combo.clear()
         self.latency_input.clear()
-
+        
         # If remember settings is enabled and we have saved values, restore them
         # without triggering saves
         if self.remember_settings:
@@ -852,15 +891,15 @@ class PipeWireSettingsApp(QWidget):
                             quantum = config['DEFAULT']['saved_quantum']
                             self.quantum_combo.setCurrentText(quantum)
                             self.apply_quantum_settings(skip_save=True)
-                            
+                        
                         if 'saved_sample_rate' in config['DEFAULT']:
                             sample_rate = config['DEFAULT']['saved_sample_rate']
                             self.sample_rate_combo.setCurrentText(sample_rate)
                             self.apply_sample_rate_settings(skip_save=True)
                 except Exception as e:
                     print(f"Error restoring saved settings during reload: {e}")
-
-       # QMessageBox.information(self, "Reload Complete", "Application settings have been reloaded.")
+        
+      #  QMessageBox.information(self, "Reload Complete", "Application settings have been reloaded.")
 
     def load_devices(self):
         self.device_combo.clear()
@@ -1008,7 +1047,6 @@ class PipeWireSettingsApp(QWidget):
                     # Set the active profile
                     if active_profile_index is not None and index == active_profile_index:
                         self.profile_combo.setCurrentText(description)
-
         except subprocess.CalledProcessError:
             print(f"Error: Unable to retrieve profiles for device {selected_device}")
 
@@ -1016,7 +1054,6 @@ class PipeWireSettingsApp(QWidget):
         selected_node = self.node_combo.currentText()
         node_id = selected_node.split('(ID: ')[-1].strip(')')
         latency_offset = self.latency_input.text()
-
         try:
             # Build base command
             command = [
@@ -1025,17 +1062,14 @@ class PipeWireSettingsApp(QWidget):
                 node_id,
                 'ProcessLatency'
             ]
-
             # Add latency parameter
             if self.nanoseconds_checkbox.isChecked():
                 command.append(f'{{ ns = {latency_offset} }}')
             else:
                 command.append(f'{{ rate = {latency_offset} }}')
-
             # Add Flatpak prefix if needed
             if self.flatpak_env:
                 command = ['flatpak-spawn', '--host'] + command
-
             # Run command
             result = subprocess.run(
                 command,
@@ -1044,7 +1078,6 @@ class PipeWireSettingsApp(QWidget):
                 stderr=subprocess.PIPE,
                 text=True
             )
-
             print(f"Applied latency offset {latency_offset} to node {selected_node}")
             print(f"Command output: {result.stdout}")
 
@@ -1074,7 +1107,6 @@ class PipeWireSettingsApp(QWidget):
         device_id = selected_device.split('(ID: ')[-1].strip(')')
         selected_profile = self.profile_combo.currentText()
         profile_index = self.profile_index_map.get(selected_profile)
-
         try:
             self.run_command(['wpctl', 'set-profile', device_id, str(profile_index)], check_output=False)
             print(f"Applied profile {selected_profile} to device {selected_device}")
@@ -1110,17 +1142,17 @@ class PipeWireSettingsApp(QWidget):
         if self.quantum_was_reset:
             print("Skipping save of quantum setting after reset")
             return
-            
+
         config = configparser.ConfigParser()
         config_path = os.path.expanduser("~/.config/cable/config.ini")
         
         # Load existing config if it exists
         if os.path.exists(config_path):
             config.read(config_path)
-            
+        
         if 'DEFAULT' not in config:
             config['DEFAULT'] = {}
-            
+        
         # Save only the quantum setting
         current_quantum = self.quantum_combo.currentText()
         if current_quantum:
@@ -1140,7 +1172,6 @@ class PipeWireSettingsApp(QWidget):
             command = ["pw-metadata", "-n", "settings", "0", "clock.force-quantum", "0"]
             if self.flatpak_env:
                 command = ["flatpak-spawn", "--host"] + command
-
             subprocess.run(
                 command,
                 check=True,
@@ -1206,17 +1237,17 @@ class PipeWireSettingsApp(QWidget):
         if self.sample_rate_was_reset:
             print("Skipping save of sample rate setting after reset")
             return
-            
+
         config = configparser.ConfigParser()
         config_path = os.path.expanduser("~/.config/cable/config.ini")
         
         # Load existing config if it exists
         if os.path.exists(config_path):
             config.read(config_path)
-            
+        
         if 'DEFAULT' not in config:
             config['DEFAULT'] = {}
-            
+        
         # Save only the sample rate setting
         current_sample_rate = self.sample_rate_combo.currentText()
         if current_sample_rate:
@@ -1236,7 +1267,6 @@ class PipeWireSettingsApp(QWidget):
             command = ["pw-metadata", "-n", "settings", "0", "clock.force-rate", "0"]
             if self.flatpak_env:
                 command = ["flatpak-spawn", "--host"] + command
-
             subprocess.run(
                 command,
                 check=True,
@@ -1286,13 +1316,13 @@ class PipeWireSettingsApp(QWidget):
                         config.read(config_path)
                         has_saved_quantum = 'DEFAULT' in config and 'saved_quantum' in config['DEFAULT']
                         has_saved_sample_rate = 'DEFAULT' in config and 'saved_sample_rate' in config['DEFAULT']
-                        
+                            
                         # If we have both saved settings, don't load from system
                         if has_saved_quantum and has_saved_sample_rate:
                             # Settings will be loaded from config in load_settings() method
                             print("Using saved settings from config instead of current system settings")
                             return
-            
+
             # Get current system values
             # Get sample rate
             forced_rate = self.get_metadata_value('clock.force-rate')
@@ -1347,12 +1377,10 @@ class PipeWireSettingsApp(QWidget):
                 
                 # Restore previous signal block state
                 self.quantum_combo.blockSignals(prev_block_state)
-
+            
             self.update_latency_display()
-
         except Exception as e:
             print(f"Error loading settings: {e}")
-
 
     def run_command(self, command_args, check_output=True):
         """Generic command runner with Flatpak support"""
@@ -1404,18 +1432,6 @@ class PipeWireSettingsApp(QWidget):
             QMessageBox.critical(self, "Error",
                               f"Error toggling autostart: {str(e)}")
 
-    def update_latency_display(self):
-        try:
-            quantum = int(self.quantum_combo.currentText())
-            sample_rate = int(self.sample_rate_combo.currentText())
-            if sample_rate == 0:
-                self.latency_display_value.setText("N/A")
-            else:
-                latency_ms = quantum / sample_rate * 1000
-                self.latency_display_value.setText(f"{latency_ms:.2f} ms")
-        except ValueError:
-            self.latency_display_value.setText("N/A")
-
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Cable - PipeWire Settings Manager')
@@ -1428,7 +1444,7 @@ def main():
     
     # Create main window
     ex = PipeWireSettingsApp()
-
+    
     # Handle initial window state
     if args.minimized:
         # Ensure tray is enabled when starting minimized
@@ -1440,10 +1456,9 @@ def main():
     else:
         # Show window normally
         ex.show()
-
+    
     # Run the application and exit
     sys.exit(app.exec())
-
 
 if __name__ == '__main__':
     main()
