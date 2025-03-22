@@ -87,6 +87,7 @@ class PipeWireSettingsApp(QWidget):
         self.autostart_enabled = False
         self.quantum_was_reset = False
         self.sample_rate_was_reset = False
+        self.values_initialized = False  # Flag to track if values have been initialized
         
         # Initialize UI first
         self.initUI()
@@ -102,6 +103,12 @@ class PipeWireSettingsApp(QWidget):
         
         # Now allow saving of user changes
         self.initial_load = False
+        
+        # Mark values as initialized
+        self.values_initialized = True
+        
+        # Update latency display after everything is loaded
+        self.update_latency_display()
 
 
     def get_metadata_value(self, key):
@@ -606,6 +613,8 @@ class PipeWireSettingsApp(QWidget):
     def handle_show_action(self):
         """Show the main Cable window"""
         if not self.isVisible():
+            # Force refresh settings when showing from tray
+            self.load_current_settings()
             self.show()  # PyQt6: showNormal() is now show() for restoring
             self.activateWindow()
 
@@ -657,6 +666,8 @@ class PipeWireSettingsApp(QWidget):
                     # Don't schedule a relaunch
             else:
                 if self.isMinimized() or not self.isVisible():
+                    # Force refresh settings before showing
+                    self.load_current_settings()
                     self.show()  # Restore window if minimized
                     self.activateWindow()  # Bring window to the front
                 else:
@@ -772,7 +783,9 @@ class PipeWireSettingsApp(QWidget):
             else:
                 latency_ms = quantum / sample_rate * 1000
                 self.latency_display_value.setText(f"{latency_ms:.2f} ms")
-        except ValueError:
+                print(f"Updated latency display: {latency_ms:.2f} ms (quantum={quantum}, sample_rate={sample_rate})")
+        except ValueError as e:
+            print(f"Error updating latency display: {e}")
             self.latency_display_value.setText("N/A")
 
     def set_button_style(self, button):
@@ -1182,6 +1195,7 @@ class PipeWireSettingsApp(QWidget):
             
             # Set the reset flag to prevent saving default values
             self.quantum_was_reset = True
+            print("Loading default quantum value from system, marked as reset")
             
             # Remove saved_quantum from config if it exists
             config = configparser.ConfigParser()
@@ -1195,7 +1209,7 @@ class PipeWireSettingsApp(QWidget):
                     print("Removed saved quantum setting from config")
             
             # Reload current settings but don't save them
-            self.load_current_settings()
+            self.load_current_settings(force_reset_quantum=True)
         except subprocess.CalledProcessError as e:
             print(f"Reset quantum failed: {e.stderr.decode()}")
             QMessageBox.critical(
@@ -1277,6 +1291,7 @@ class PipeWireSettingsApp(QWidget):
             
             # Set the reset flag to prevent saving default values
             self.sample_rate_was_reset = True
+            print("Loading default sample rate value from system, marked as reset")
             
             # Remove saved_sample_rate from config if it exists
             config = configparser.ConfigParser()
@@ -1290,7 +1305,7 @@ class PipeWireSettingsApp(QWidget):
                     print("Removed saved sample rate setting from config")
             
             # Reload current settings but don't save them
-            self.load_current_settings()
+            self.load_current_settings(force_reset_sample_rate=True)
         except subprocess.CalledProcessError as e:
             print(f"Reset sample rate failed: {e.stderr.decode()}")
             QMessageBox.critical(
@@ -1303,7 +1318,7 @@ class PipeWireSettingsApp(QWidget):
         except Exception as e:
             print(f"Error modifying config: {e}")
 
-    def load_current_settings(self):
+    def load_current_settings(self, force_reset_quantum=False, force_reset_sample_rate=False):
         try:
             # If during startup, don't try to check for saved values yet
             if not hasattr(self, 'initial_load') or not self.initial_load:
@@ -1338,16 +1353,13 @@ class PipeWireSettingsApp(QWidget):
             else:
                 quantum = forced_quantum
                 
-            # Check if we're loading system defaults and set the reset flags accordingly
-            # When we load the default values, mark them as "reset" so they don't get
-            # automatically saved back to config
-            if forced_quantum in (None, "0"):
+            # Only mark values as reset if explicitly requested by the reset functions
+            # or if force_reset flags are set
+            if force_reset_quantum and forced_quantum in (None, "0"):
                 self.quantum_was_reset = True
-                print("Loading default quantum value from system, marked as reset")
-                
-            if forced_rate in (None, "0"):
+            
+            if force_reset_sample_rate and forced_rate in (None, "0"):
                 self.sample_rate_was_reset = True
-                print("Loading default sample rate value from system, marked as reset")
 
             # Update UI elements without triggering save operations
             if sample_rate:
@@ -1453,6 +1465,9 @@ def main():
             ex.toggle_tray_icon(Qt.CheckState.Checked)
         # Start hidden
         ex.hide()
+        # Force a complete refresh of settings after a short delay
+        # This simulates clicking the "Refresh" button when starting minimized
+        QTimer.singleShot(1000, ex.load_current_settings)
     else:
         # Show window normally
         ex.show()
