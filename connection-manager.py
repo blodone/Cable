@@ -814,7 +814,7 @@ class JackConnectionManager(QMainWindow):
 
         bottom_layout.addStretch()
         bottom_layout.addWidget(self.auto_refresh_checkbox)
-        bottom_layout.addWidget(self.collapse_all_checkbox)  # Added the new checkbox here
+        bottom_layout.addWidget(self.collapse_all_checkbox)
         bottom_layout.addWidget(self.undo_button)
         bottom_layout.addWidget(self.redo_button)
         bottom_layout.addStretch()
@@ -827,7 +827,10 @@ class JackConnectionManager(QMainWindow):
         # Initialize callback state from config
         self.callbacks_enabled = auto_refresh_enabled
         
-        # No longer apply collapse state here - it will be handled after port population
+        # Initialize visibility based on current tab
+        # This ensures controls are hidden if we start directly on pw-top tab
+        current_tab = self.tab_widget.currentIndex() if hasattr(self, 'tab_widget') else 0
+        self.show_bottom_controls(current_tab < 2)
 
     # Add new method to apply collapse state to all trees
     def apply_collapse_state_to_all_trees(self):
@@ -877,9 +880,26 @@ class JackConnectionManager(QMainWindow):
             
             # Refresh the visualization immediately on tab switch
             self.refresh_visualizations()
+            
+            # Show bottom controls for non-pw-top tabs
+            self.show_bottom_controls(True)
         elif index == 2:  # PipeWire Stats tab
             if self.pw_process is None:
                 self.start_pwtop_process()
+                
+            # Hide bottom controls for pw-top tab
+            self.show_bottom_controls(False)
+
+    def show_bottom_controls(self, visible):
+        """Show or hide bottom controls based on active tab"""
+        if hasattr(self, 'auto_refresh_checkbox'):
+            self.auto_refresh_checkbox.setVisible(visible)
+        if hasattr(self, 'collapse_all_checkbox'):
+            self.collapse_all_checkbox.setVisible(visible)
+        if hasattr(self, 'undo_button'):
+            self.undo_button.setVisible(visible)
+        if hasattr(self, 'redo_button'):
+            self.redo_button.setVisible(visible)
 
     def _handle_port_registration(self, port, register: bool):
         """JACK callback for port registration events. This runs in JACK's thread."""
@@ -956,8 +976,8 @@ class JackConnectionManager(QMainWindow):
             self.text_color = QColor(255, 255, 255)
             self.highlight_color = QColor(42, 130, 218)
             self.button_color = QColor(68, 68, 68)
-            self.connection_color = QColor(0, 150, 255)
-            self.auto_highlight_color = QColor(255, 165, 0)
+            self.connection_color = QColor(0, 150, 255)  # Brighter blue for dark mode
+            self.auto_highlight_color = QColor(255, 200, 0)  # Brighter orange
             self.drag_highlight_color = QColor(100, 100, 100) # New color for drag highlight
         else:
             self.background_color = QColor(255, 255, 255)
@@ -1363,8 +1383,21 @@ class JackConnectionManager(QMainWindow):
                 
                 # Use a consistent color for connections from the same source
                 base_name = output_name.rsplit(':', 1)[0]
-                color = self.get_random_color(base_name)
-                pen = QPen(color, 2)
+                
+                # Get a base random color
+                random.seed(base_name)
+                base_color = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                
+                # Brighten the color in dark mode for better visibility
+                if self.dark_mode:
+                    # Make colors more vibrant and brighter in dark mode
+                    h, s, v, a = base_color.getHsvF()
+                    # Increase saturation and value for more vibrant appearance
+                    s = min(1.0, s * 1.4)  # Increase saturation by 40%
+                    v = min(1.0, v * 1.3)  # Increase brightness by 30%
+                    base_color.setHsvF(h, s, v, a)
+                
+                pen = QPen(base_color, 2)
                 path_item = QGraphicsPathItem(path)
                 path_item.setPen(pen)
                 scene.addItem(path_item)

@@ -1320,23 +1320,21 @@ class PipeWireSettingsApp(QWidget):
 
     def load_current_settings(self, force_reset_quantum=False, force_reset_sample_rate=False):
         try:
-            # If during startup, don't try to check for saved values yet
-            if not hasattr(self, 'initial_load') or not self.initial_load:
-                # If remember settings is enabled and we have saved values, don't override them
-                if self.remember_settings:
-                    config = configparser.ConfigParser()
-                    config_path = os.path.expanduser("~/.config/cable/config.ini")
-                    
-                    if os.path.exists(config_path):
-                        config.read(config_path)
-                        has_saved_quantum = 'DEFAULT' in config and 'saved_quantum' in config['DEFAULT']
-                        has_saved_sample_rate = 'DEFAULT' in config and 'saved_sample_rate' in config['DEFAULT']
-                            
-                        # If we have both saved settings, don't load from system
-                        if has_saved_quantum and has_saved_sample_rate:
-                            # Settings will be loaded from config in load_settings() method
-                            print("Using saved settings from config instead of current system settings")
-                            return
+            # Only check saved values during initial load when remember_settings is True
+            if (hasattr(self, 'initial_load') and self.initial_load and
+                self.remember_settings):
+                config = configparser.ConfigParser()
+                config_path = os.path.expanduser("~/.config/cable/config.ini")
+                
+                if os.path.exists(config_path):
+                    config.read(config_path)
+                    has_saved_quantum = 'DEFAULT' in config and 'saved_quantum' in config['DEFAULT']
+                    has_saved_sample_rate = 'DEFAULT' in config and 'saved_sample_rate' in config['DEFAULT']
+                        
+                    # If we have both saved settings, don't load from system during initial load
+                    if has_saved_quantum and has_saved_sample_rate:
+                        print("Using saved settings from config during initial load")
+                        return
 
             # Get current system values
             # Get sample rate
