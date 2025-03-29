@@ -7,12 +7,19 @@ import dbus
 import configparser
 import argparse
 import shutil
+import requests
+from packaging import version
+import webbrowser # Might not be needed if setOpenExternalLinks works directly
 from PyQt6.QtCore import Qt, QTimer, QFile, QMargins, QProcess
 from PyQt6.QtGui import QFont, QIcon, QGuiApplication, QActionGroup, QAction
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QLineEdit, QPushButton, QLabel,
                              QSpacerItem, QSizePolicy, QMessageBox, QGroupBox,
                              QCheckBox, QSystemTrayIcon, QMenu)
+
+# --- Application Version ---
+APP_VERSION = "0.7.4"
+# -------------------------
 
 class AutostartManager:
     """Manages autostart functionality using XDG autostart"""
@@ -21,7 +28,7 @@ class AutostartManager:
         self.desktop_file = os.path.join(self.autostart_dir, "cable-autostart.desktop")
         
         # Set the appropriate Exec line based on environment
-        exec_line = "/usr/bin/flatpak run com.example.cable --minimized" if flatpak_env else "cable --minimized"
+        exec_line = "/usr/bin/flatpak run com.example.cable --minimized" if flatpak_env else "pw-jack cable --minimized"
         
         self.desktop_content = f"""[Desktop Entry]
 Type=Application
@@ -106,9 +113,12 @@ class PipeWireSettingsApp(QWidget):
         
         # Mark values as initialized
         self.values_initialized = True
-        
+
         # Update latency display after everything is loaded
         self.update_latency_display()
+
+        # Check for updates shortly after startup
+        QTimer.singleShot(2000, self.check_for_updates) # Check after 2 seconds
 
 
     def get_metadata_value(self, key):
@@ -325,6 +335,17 @@ class PipeWireSettingsApp(QWidget):
         self.remember_settings_checkbox.stateChanged.connect(self.toggle_remember_settings)
         remember_settings_layout.addWidget(self.remember_settings_checkbox)
         main_layout.addLayout(remember_settings_layout)
+
+        # Add version label at the bottom right
+        version_layout = QHBoxLayout()
+        version_layout.addStretch() # Push label to the right
+        self.version_label = QLabel()
+        self.version_label.setTextFormat(Qt.TextFormat.RichText) # Allow HTML links
+        self.version_label.setOpenExternalLinks(True) # Make links clickable
+        self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: grey; text-decoration: none;">{APP_VERSION}</a>')
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        version_layout.addWidget(self.version_label)
+        main_layout.addLayout(version_layout) # Add to the main layout
 
 
     def load_settings(self):
@@ -1441,6 +1462,57 @@ class PipeWireSettingsApp(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error",
                               f"Error toggling autostart: {str(e)}")
+
+    def check_for_updates(self):
+        """Checks GitHub for newer versions and updates the version label color."""
+        print("Checking for updates...")
+        try:
+            # Use a timeout to prevent hanging indefinitely
+            response = requests.get("https://api.github.com/repos/magillos/Cable/tags", timeout=10)
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            tags = response.json()
+
+            if not tags:
+                print("No tags found on GitHub.")
+                return
+
+            # Extract version numbers from tag names (assuming tags are like 'vX.Y.Z' or 'X.Y.Z')
+            latest_version = None
+            for tag in tags:
+                tag_name = tag.get('name', '').lstrip('v') # Remove leading 'v' if present
+                try:
+                    current_tag_version = version.parse(tag_name)
+                    if latest_version is None or current_tag_version > latest_version:
+                        latest_version = current_tag_version
+                except version.InvalidVersion:
+                    print(f"Skipping invalid tag name: {tag.get('name')}")
+                    continue # Skip tags that don't parse as versions
+
+            if latest_version:
+                current_app_version = version.parse(APP_VERSION)
+                print(f"Current version: {current_app_version}, Latest GitHub version: {latest_version}")
+                if latest_version > current_app_version:
+                    print("Newer version found!")
+                    # Update label style to red and add update info
+                    self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: orange; text-decoration: none;">{APP_VERSION} (Update available: {latest_version})</a>')
+                else:
+                    print("Application is up to date.")
+                    # Ensure label is default color (grey) if already up-to-date
+                    self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: grey; text-decoration: none;">{APP_VERSION}</a>')
+            else:
+                print("Could not determine the latest version from tags.")
+
+        except requests.exceptions.RequestException as e:
+            # Handle network errors, timeouts, etc.
+            print(f"Error checking for updates (network issue): {e}")
+            # Optionally update the label to indicate the check failed
+            # self.version_label.setText(f'<span style="color: orange;">{APP_VERSION} (Update check failed)</span>')
+        except json.JSONDecodeError as e:
+            print(f"Error checking for updates (invalid JSON response): {e}")
+        except Exception as e:
+            # Catch any other unexpected errors
+            print(f"An unexpected error occurred during update check: {e}")
+
 
 def main():
     # Parse command line arguments
