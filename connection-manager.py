@@ -3,14 +3,16 @@ import random
 import re
 import configparser
 import os
+import shutil # Import shutil for command existence check
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
                              QGraphicsPathItem, QCheckBox, QMenu, QSizePolicy, QSpacerItem,
-                             QButtonGroup, QTextEdit, QTreeWidget, QTreeWidgetItem, QLineEdit) # Added QLineEdit here
+                             QButtonGroup, QTextEdit, QTreeWidget, QTreeWidgetItem, QLineEdit,
+                             QComboBox) # Added QLineEdit and QComboBox here
 from PyQt6.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect, QProcess, pyqtSignal, QPoint
 from PyQt6.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
-                         QPainterPath, QFontMetrics, QFont, QAction, QPixmap, QGuiApplication)
+                         QPainterPath, QFontMetrics, QFont, QAction, QPixmap, QGuiApplication, QTextCursor) # Added QTextCursor
 import jack
 
 # Add custom handler for unraisable exceptions
@@ -513,6 +515,15 @@ class JackConnectionManager(QMainWindow):
         self.pwtop_buffer = ""  # Buffer to store pw-top output
         self.last_complete_cycle = None  # Store last complete cycle
 
+        # Latency test variables
+        self.latency_process = None
+        self.latency_values = []
+        self.latency_timer = QTimer()
+        self.latency_waiting_for_connection = False # Flag to wait for connection
+        # Store selected physical port aliases for latency test
+        self.latency_selected_input_alias = None
+        self.latency_selected_output_alias = None
+
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
@@ -523,14 +534,17 @@ class JackConnectionManager(QMainWindow):
         self.audio_tab_widget = QWidget()
         self.midi_tab_widget = QWidget()
         self.pwtop_tab_widget = QWidget()
+        self.latency_tab_widget = QWidget() # Added Latency Tab Widget
 
         self.setup_port_tab(self.audio_tab_widget, "Audio", 'audio')
         self.setup_port_tab(self.midi_tab_widget, "MIDI", 'midi')
         self.setup_pwtop_tab(self.pwtop_tab_widget)
+        self.setup_latency_tab(self.latency_tab_widget) # Added call to setup latency tab
 
         self.tab_widget.addTab(self.audio_tab_widget, "Audio")
         self.tab_widget.addTab(self.midi_tab_widget, "MIDI")
         self.tab_widget.addTab(self.pwtop_tab_widget, "pw-top")
+        self.tab_widget.addTab(self.latency_tab_widget, "Latency Test") # Added Latency Tab
         self.tab_widget.currentChanged.connect(self.switch_tab)
 
         self.setup_bottom_layout(main_layout)
@@ -700,10 +714,369 @@ class JackConnectionManager(QMainWindow):
 
         return '\n'.join(section)
 
+    # --- Latency Test Methods ---
+
+    def run_latency_test(self):
+        """Starts the jack_delay process and timer."""
+        if self.latency_process is not None and self.latency_process.state() != QProcess.ProcessState.NotRunning:
+            self.latency_results_text.append("Test already in progress.")
+            return
+
+        # Refresh combo boxes with latest ports
+        self._populate_latency_combos()
+
+        self.latency_run_button.setEnabled(False)
+        self.latency_stop_button.setEnabled(True) # Enable Stop button
+        self.latency_results_text.setText("Starting latency test...\n"
+                                          "Select ports if not already selected.\n"
+                                          "Attempting auto-connection...\n"
+                                          "Waiting for measurement signal...\n") # Updated message
+        self.latency_values = []
+        self.latency_waiting_for_connection = True # Set flag to wait
+
+        self.latency_process = QProcess()
+        self.latency_process.readyReadStandardOutput.connect(self.handle_latency_output)
+        self.latency_process.finished.connect(self.handle_latency_finished)
+        self.latency_process.errorOccurred.connect(self.handle_latency_error)
+
+        # Determine command based on environment
+        if self.flatpak_env:
+            program = "flatpak-spawn"
+            arguments = ["--host", "jack_delay"]
+        else:
+            # Try jack_delay first, then jack_iodelay as fallback
+            program = shutil.which("jack_delay")
+            if program is None:
+                program = shutil.which("jack_iodelay")
+
+            # If neither is found, show error and exit
+            if program is None:
+                 self.latency_results_text.setText("Error: Neither 'jack_delay' nor 'jack_iodelay' found.\n"
+                                                   "Depending on your distribution, install jack-delay, jack_delay or jack-example-tools (jack_iodelay).")
+                 self.latency_run_button.setEnabled(True)  # Re-enable run button
+                 self.latency_stop_button.setEnabled(False) # Ensure stop is disabled
+                 self.latency_process = None # Clear the process object
+                 return # Stop execution
+
+            arguments = []
+
+        self.latency_process.setProgram(program) # Use the found program path
+        self.latency_process.setArguments(arguments)
+        self.latency_process.start() # Start the process
+        # Connection attempt is now triggered by _on_port_registered when jack_delay ports appear.
+
+    def handle_latency_output(self):
+        """Handles output from the jack_delay process."""
+        if self.latency_process is None:
+            return
+
+        data = self.latency_process.readAllStandardOutput().data().decode()
+        # self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End) # Removed
+        # self.latency_results_text.insertPlainText(data) # Removed - Don't show raw output
+        # self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End) # Removed
+
+        # Check if we are waiting for the connection signal
+        if self.latency_waiting_for_connection:
+            # Check if any line contains a latency measurement
+            if re.search(r'\d+\.\d+\s+ms', data):
+                self.latency_waiting_for_connection = False
+                self.latency_results_text.setText("Connection detected. Running test...") # Changed message
+                # Start the timer now
+                self.latency_timer.setSingleShot(True)
+                self.latency_timer.timeout.connect(self.stop_latency_test)
+                self.latency_timer.start(10000) # 10 seconds
+
+        # If not waiting (or connection just detected), parse for values
+        if not self.latency_waiting_for_connection:
+            for line in data.splitlines():
+                match = re.search(r'(\d+\.\d+)\s+ms', line)
+                if match:
+                    try:
+                        latency_ms = float(match.group(1))
+                        self.latency_values.append(latency_ms)
+                    except ValueError:
+                        pass # Ignore lines that don't parse correctly
+
+    def stop_latency_test(self):
+        """Stops the jack_delay process."""
+        if self.latency_timer.isActive():
+            self.latency_timer.stop() # Stop timer if called manually before timeout
+
+        if self.latency_process is not None and self.latency_process.state() != QProcess.ProcessState.NotRunning:
+            self.latency_results_text.append("\nStopping test...")
+            self.latency_process.terminate()
+            # Give it a moment to terminate gracefully before potentially killing
+            if not self.latency_process.waitForFinished(500):
+                self.latency_process.kill()
+                self.latency_process.waitForFinished() # Wait for kill confirmation
+
+            self.latency_waiting_for_connection = False # Reset flag
+
+    def handle_latency_finished(self, exit_code, exit_status):
+        """Handles the jack_delay process finishing."""
+        # Clear previous text before showing final result
+        self.latency_results_text.clear()
+
+        if self.latency_values:
+            average_latency = sum(self.latency_values) / len(self.latency_values)
+            # Display only the average latency
+            self.latency_results_text.setText(f"Latency (average): {average_latency:.3f} ms")
+        else:
+            # Check if the process exited normally but produced no values
+            if exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0:
+                 # Display a clear error message
+                 self.latency_results_text.setText("No valid latency readings obtained. Check connections.")
+            elif exit_status == QProcess.ExitStatus.CrashExit:
+                 self.latency_results_text.setText("Measurement stopped.")
+            # Error message handled by handle_latency_error if exit code != 0 and no values were found
+            elif exit_code != 0:
+                 # If an error occurred (handled by handle_latency_error),
+                 # ensure some message is shown if handle_latency_error didn't set one.
+                 if not self.latency_results_text.toPlainText():
+                     self.latency_results_text.setText(f"Test failed (Exit code: {exit_code}). Check connections.")
+            else: # Should not happen often, but catch other cases
+                 self.latency_results_text.setText("Test finished without valid readings.")
+
+
+        self.latency_waiting_for_connection = False # Reset flag
+        self.latency_run_button.setEnabled(True)
+        self.latency_stop_button.setEnabled(False) # Disable Stop button
+        self.latency_process = None # Clear the process reference
+
+    def handle_latency_error(self, error):
+        """Handles errors occurring during the jack_delay process execution."""
+        error_string = self.latency_process.errorString() if self.latency_process else "Unknown error"
+        self.latency_results_text.append(f"\nError running jack_delay: {error} - {error_string}")
+
+        # Ensure timer and process are stopped/cleaned up
+        if self.latency_timer.isActive():
+            self.latency_timer.stop()
+        if self.latency_process is not None:
+            # Ensure process is terminated if it hasn't finished yet
+            if self.latency_process.state() != QProcess.ProcessState.NotRunning:
+                self.latency_process.kill()
+                self.latency_process.waitForFinished()
+            self.latency_process = None
+
+        self.latency_waiting_for_connection = False # Reset flag
+        self.latency_run_button.setEnabled(True)
+        self.latency_stop_button.setEnabled(False) # Disable Stop button on error
+
+    # --- End Latency Test Methods ---
+
     def update_pwtop_output(self):
         """Handle pw-top output updates"""
         if self.pw_process is not None:
             self.handle_pwtop_output()
+
+    def setup_latency_tab(self, tab_widget):
+        """Set up the Latency Test tab"""
+        layout = QVBoxLayout(tab_widget)
+
+        # Instructions Label
+
+        instructions_text = (
+            "<b>Instructions:</b><br><br>"
+            "1. Ensure 'jack_delay', 'jack-delay' or 'jack_iodelay' (via 'jack-example-tools') is installed.<br>"
+            "2. Physically connect an output and input of your audio interface using a cable (loopback).<br>"
+            "3. Select the corresponding Input (Capture) and Output (Playback) ports using the dropdowns below.<br>"
+            "4. Click 'Start Measurement'. The selected ports will be automatically connected to jack_delay.<br>"
+            "(you can click 'Start Measurement' first and then try different ports)<br>"
+            "5. <b><font color='orange'>Warning:</font></b> Start with low volume/gain levels on your interface "
+            "to avoid potential damage from the test signal.<br><br>"
+            "After the signal is detected, the average measured latency will be shown after 10 seconds.<br><br><br><br><br>"
+        )
+
+        instructions_label = QLabel(instructions_text)
+        instructions_label.setWordWrap(True)
+        instructions_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # Increase font size for instructions
+        instructions_label.setStyleSheet(f"color: {self.text_color.name()}; font-size: 11pt;")
+        layout.addWidget(instructions_label)
+
+        # --- Combo Boxes for Port Selection ---
+        self.latency_input_combo = QComboBox()
+        self.latency_input_combo.setPlaceholderText("Select Input (Capture)...")
+        self.latency_input_combo.setStyleSheet(self.list_stylesheet()) # Reuse list style
+
+        self.latency_output_combo = QComboBox()
+        self.latency_output_combo.setPlaceholderText("Select Output (Playback)...")
+        self.latency_output_combo.setStyleSheet(self.list_stylesheet()) # Reuse list style
+
+        # --- Refresh Button ---
+        self.latency_refresh_button = QPushButton("Refresh Ports")
+        self.latency_refresh_button.setStyleSheet(self.button_stylesheet())
+        self.latency_refresh_button.clicked.connect(self._populate_latency_combos) # Connect to refresh method
+        # --- End Refresh Button ---
+
+        # Input Row
+        input_combo_layout = QHBoxLayout()
+        input_combo_layout.addWidget(QLabel("Input  Port:  "))
+        input_combo_layout.addWidget(self.latency_input_combo, 1) # Add stretch factor
+        input_combo_layout.addStretch(1) # Add spacer to limit dropdown width
+        layout.addLayout(input_combo_layout)
+
+        # Output Row
+        output_combo_layout = QHBoxLayout()
+        output_combo_layout.addWidget(QLabel("Output Port:"))
+        output_combo_layout.addWidget(self.latency_output_combo, 1) # Add stretch factor
+        output_combo_layout.addStretch(1) # Add spacer to limit dropdown width
+        layout.addLayout(output_combo_layout)
+
+        # Add Refresh button separately below the dropdowns
+        refresh_button_layout = QHBoxLayout()
+        refresh_button_layout.addStretch(1) # Push button to the right
+        refresh_button_layout.addWidget(self.latency_refresh_button)
+        layout.addLayout(refresh_button_layout)
+        # --- End Combo Boxes ---
+
+
+        # Buttons Layout
+        button_layout = QHBoxLayout()
+        self.latency_run_button = QPushButton('Start measurement')
+        self.latency_run_button.setStyleSheet(self.button_stylesheet())
+        self.latency_run_button.clicked.connect(self.run_latency_test)
+
+        self.latency_stop_button = QPushButton('Stop')
+        self.latency_stop_button.setStyleSheet(self.button_stylesheet())
+        self.latency_stop_button.clicked.connect(self.stop_latency_test)
+        self.latency_stop_button.setEnabled(False) # Initially disabled
+
+        button_layout.addWidget(self.latency_run_button)
+        button_layout.addWidget(self.latency_stop_button)
+        layout.addLayout(button_layout) # Add the horizontal layout for buttons
+
+        # Results Text Edit
+        self.latency_results_text = QTextEdit()
+        self.latency_results_text.setReadOnly(True)
+        # Increase font size for results text
+        self.latency_results_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {self.background_color.name()};
+                color: {self.text_color.name()};
+                font-family: monospace;
+                font-size: 14pt;
+            }}
+        """)
+        self.latency_results_text.setText("Ready to test.")
+        layout.addWidget(self.latency_results_text, 1) # Add stretch factor
+
+        # Populate combo boxes
+        self._populate_latency_combos()
+
+        # Connect signals
+        self.latency_input_combo.currentIndexChanged.connect(self._on_latency_input_selected)
+        self.latency_output_combo.currentIndexChanged.connect(self._on_latency_output_selected)
+
+    def _populate_latency_combos(self):
+        """Populates the latency test combo boxes using python-jack."""
+        capture_ports = [] # Physical capture devices (JACK outputs)
+        playback_ports = [] # Physical playback devices (JACK inputs)
+        try:
+            # Get physical capture ports (System Output -> JACK Input)
+            jack_capture_ports = self.client.get_ports(is_physical=True, is_audio=True, is_output=True)
+            capture_ports = sorted([port.name for port in jack_capture_ports])
+
+            # Get physical playback ports (System Input <- JACK Output)
+            jack_playback_ports = self.client.get_ports(is_physical=True, is_audio=True, is_input=True)
+            playback_ports = sorted([port.name for port in jack_playback_ports])
+
+        except jack.JackError as e:
+            print(f"Error getting physical JACK ports: {e}")
+            # Optionally display an error in the UI
+
+        # Block signals while populating to avoid triggering handlers prematurely
+        self.latency_input_combo.blockSignals(True)
+        self.latency_output_combo.blockSignals(True)
+
+        # Clear existing items first, keeping placeholder
+        self.latency_input_combo.clear()
+        self.latency_output_combo.clear()
+        self.latency_input_combo.addItem("Select Physical Input (Capture)...", None) # Add placeholder back
+        self.latency_output_combo.addItem("Select Physical Output (Playback)...", None) # Add placeholder back
+
+        # Populate Input Combo (Capture Ports - JACK Outputs)
+        for port_name in capture_ports:
+            self.latency_input_combo.addItem(port_name, port_name) # Use name for display and data
+
+        # Populate Output Combo (Playback Ports - JACK Inputs)
+        for port_name in playback_ports:
+            self.latency_output_combo.addItem(port_name, port_name) # Use name for display and data
+
+        # Restore previous selection if port names still exist
+        if self.latency_selected_input_alias:
+            index = self.latency_input_combo.findData(self.latency_selected_input_alias)
+            if index != -1:
+                self.latency_input_combo.setCurrentIndex(index)
+        if self.latency_selected_output_alias:
+            index = self.latency_output_combo.findData(self.latency_selected_output_alias)
+            if index != -1:
+                self.latency_output_combo.setCurrentIndex(index)
+
+        # Unblock signals
+        self.latency_input_combo.blockSignals(False)
+        self.latency_output_combo.blockSignals(False)
+
+
+    def _on_latency_input_selected(self, index):
+        """Stores the selected physical input port alias."""
+        self.latency_selected_input_alias = self.latency_input_combo.itemData(index)
+        # Attempt connection if output is also selected and test is running
+        self._attempt_latency_auto_connection()
+
+    def _on_latency_output_selected(self, index):
+        """Stores the selected physical output port alias."""
+        self.latency_selected_output_alias = self.latency_output_combo.itemData(index)
+        # Attempt connection if input is also selected and test is running
+        self._attempt_latency_auto_connection()
+
+    def _attempt_latency_auto_connection(self):
+        """Connects selected physical ports to jack_delay if ports are selected."""
+        # Only connect if both an input and output alias have been selected from the dropdowns.
+        # The call to this function is now triggered by jack_delay port registration.
+        if (self.latency_selected_input_alias and
+            self.latency_selected_output_alias):
+
+            # Pipewire 'in' direction (our output_ports list) connects to jack_delay:out
+            # Pipewire 'out' direction (our input_ports list) connects to jack_delay:in
+            output_to_connect = self.latency_selected_output_alias # This is the physical playback port alias
+            input_to_connect = self.latency_selected_input_alias   # This is the physical capture port alias
+
+            print(f"Attempting auto-connection: jack_delay:out -> {output_to_connect}")
+            print(f"Attempting auto-connection: {input_to_connect} -> jack_delay:in")
+
+            # Use the existing connection methods (ensure jack_delay ports exist first)
+            # We might need a small delay or check if jack_delay ports are ready.
+            # For now, let's assume they appear quickly after process start.
+            try:
+                # Connect jack_delay output to the selected physical playback port
+                # Ensure the target port exists before connecting
+                if any(p.name == output_to_connect for p in self.client.get_ports(is_input=True, is_audio=True)):
+                     self.make_connection("jack_delay:out", output_to_connect)
+                else:
+                     print(f"Warning: Target output port '{output_to_connect}' not found.")
+
+                # Connect the selected physical capture port to jack_delay input
+                # Ensure the target port exists before connecting
+                if any(p.name == input_to_connect for p in self.client.get_ports(is_output=True, is_audio=True)):
+                    self.make_connection(input_to_connect, "jack_delay:in")
+                else:
+                    print(f"Warning: Target input port '{input_to_connect}' not found.")
+
+                self.latency_results_text.append("\nTry diffrent ports if you're seeing this message after clicking 'Start measurement button")
+                # Refresh the audio tab view to show the new connections
+                if self.port_type == 'audio':
+                    self.refresh_ports()
+
+            except jack.JackError as e:
+                 # Catch specific Jack errors if needed, e.g., port not found
+                 print(f"Error during latency auto-connection (JackError): {e}")
+                 self.latency_results_text.append(f"\nError auto-connecting (JACK): {e}")
+            except Exception as e:
+                print(f"Error during latency auto-connection: {e}")
+                self.latency_results_text.append(f"\nError auto-connecting: {e}")
+
+    # Removed _get_physical_audio_ports method as we now use python-jack directly
 
     def setup_port_tab(self, tab_widget, tab_name, port_type):
         layout = QVBoxLayout(tab_widget)
@@ -922,25 +1295,23 @@ class JackConnectionManager(QMainWindow):
         self.config_manager.set_bool('collapse_all_enabled', is_checked)
 
     def switch_tab(self, index):
-        if (index < 2):  # Audio or MIDI tabs
-            if hasattr(self, 'pw_process') and self.pw_process is not None:
-                self.stop_pwtop_process()  # Stop pw-top when switching away
+        # Stop pw-top if switching away from it (index is the *new* index)
+        if index != 2 and hasattr(self, 'pw_process') and self.pw_process is not None:
+            self.stop_pwtop_process()
+        
+        # Configure based on the new tab index
+        if index < 2:  # Audio or MIDI tabs
             self.port_type = 'audio' if index == 0 else 'midi'
-
-            # Apply collapse state when switching tabs
             self.apply_collapse_state_to_all_trees()
-
-            # Refresh the visualization immediately on tab switch
             self.refresh_visualizations()
-
-            # Show bottom controls for non-pw-top tabs
-            self.show_bottom_controls(True)
-        elif index == 2:  # PipeWire Stats tab
-            if self.pw_process is None:
+            self.show_bottom_controls(True) # Show controls
+        elif index == 2:  # pw-top tab
+            if self.pw_process is None: # Start if not already running
                 self.start_pwtop_process()
-
-            # Hide bottom controls for pw-top tab
-            self.show_bottom_controls(False)
+            self.show_bottom_controls(False) # Hide controls
+        elif index == 3: # jack_delay tab
+            # No specific process to start here, just hide controls
+            self.show_bottom_controls(False) # Hide controls
 
     def show_bottom_controls(self, visible):
         """Show or hide bottom controls based on active tab"""
@@ -1003,20 +1374,29 @@ class JackConnectionManager(QMainWindow):
         """Handle port registration events in the Qt main thread"""
         if not self.callbacks_enabled:
             return
-        if self.port_type == 'midi' and 'midi' not in port_name:
-            return
-        if self.port_type == 'audio' and 'midi' in port_name:
-            return
+        # Removed filtering based on current port_type and name.
+        # A port registration is a global event and should trigger refresh
+        # regardless of the currently viewed tab. refresh_ports() handles
+        # displaying the correct ports for the current tab.
+
+        # Check if this is a jack_delay port registration, and if so, attempt auto-connection
+        if port_name == "jack_delay:in" or port_name == "jack_delay:out":
+            print(f"Detected registration of {port_name}, attempting latency auto-connection...")
+            # Use QTimer.singleShot to slightly delay the connection attempt,
+            # ensuring both jack_delay ports might be ready.
+            QTimer.singleShot(50, self._attempt_latency_auto_connection) # 50ms delay
+
         self.refresh_ports()
+
 
     def _on_port_unregistered(self, port_name: str, is_input: bool):
         """Handle port unregistration events in the Qt main thread"""
         if not self.callbacks_enabled:
             return
-        if self.port_type == 'midi' and 'midi' not in port_name:
-            return
-        if self.port_type == 'audio' and 'midi' in port_name:
-            return
+        # Removed filtering based on current port_type and name.
+        # A port unregistration is a global event and should trigger refresh
+        # regardless of the currently viewed tab. refresh_ports() handles
+        # displaying the correct ports for the current tab.
         self.refresh_ports()
 
     def toggle_auto_refresh(self, state):
@@ -1144,9 +1524,89 @@ class JackConnectionManager(QMainWindow):
             self.update_midi_connection_buttons()
             self._highlight_connected_ports(current_input_port, current_output_port, is_midi=True)
 
+        # --- Update Both Audio and MIDI Trees ---
+        # Always refresh the data for both tabs, regardless of which is active.
+
+        # Remember current selections and filters for both tabs
+        current_audio_input_port = self.input_tree.getSelectedPortName() if hasattr(self, 'input_tree') else None
+        current_audio_output_port = self.output_tree.getSelectedPortName() if hasattr(self, 'output_tree') else None
+        current_audio_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
+        current_audio_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
+
+        current_midi_input_port = self.midi_input_tree.getSelectedPortName() if hasattr(self, 'midi_input_tree') else None
+        current_midi_output_port = self.midi_output_tree.getSelectedPortName() if hasattr(self, 'midi_output_tree') else None
+        # MIDI uses the same filter edits as Audio
+        current_midi_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
+        current_midi_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
+
+
+        # --- Refresh Audio Ports ---
+        if hasattr(self, 'input_tree') and hasattr(self, 'output_tree'):
+            self.input_tree.clear()
+            self.output_tree.clear()
+            audio_input_ports, audio_output_ports = self._get_ports(is_midi=False)
+
+            for port in audio_input_ports:
+                self.input_tree.addPort(port)
+            for port in audio_output_ports:
+                self.output_tree.addPort(port)
+
+            # Re-apply filter
+            self.filter_ports(self.input_tree, current_audio_input_filter)
+            self.filter_ports(self.output_tree, current_audio_output_filter)
+
+            # Restore selection if port still exists and is visible
+            if current_audio_input_port and current_audio_input_port in self.input_tree.port_items:
+                item = self.input_tree.port_items[current_audio_input_port]
+                if not item.isHidden(): self.input_tree.setCurrentItem(item)
+            if current_audio_output_port and current_audio_output_port in self.output_tree.port_items:
+                item = self.output_tree.port_items[current_audio_output_port]
+                if not item.isHidden(): self.output_tree.setCurrentItem(item)
+
+        # --- Refresh MIDI Ports ---
+        if hasattr(self, 'midi_input_tree') and hasattr(self, 'midi_output_tree'):
+            self.midi_input_tree.clear()
+            self.midi_output_tree.clear()
+            midi_input_ports, midi_output_ports = self._get_ports(is_midi=True)
+
+            for port in midi_input_ports:
+                self.midi_input_tree.addPort(port)
+            for port in midi_output_ports:
+                self.midi_output_tree.addPort(port)
+
+            # Re-apply filter
+            self.filter_ports(self.midi_input_tree, current_midi_input_filter)
+            self.filter_ports(self.midi_output_tree, current_midi_output_filter)
+
+            # Restore selection if port still exists and is visible
+            if current_midi_input_port and current_midi_input_port in self.midi_input_tree.port_items:
+                item = self.midi_input_tree.port_items[current_midi_input_port]
+                if not item.isHidden(): self.midi_input_tree.setCurrentItem(item)
+            if current_midi_output_port and current_midi_output_port in self.midi_output_tree.port_items:
+                item = self.midi_output_tree.port_items[current_midi_output_port]
+                if not item.isHidden(): self.midi_output_tree.setCurrentItem(item)
+
+
+        # --- Update Visuals for the ACTIVE Tab Only ---
+        if self.port_type == 'audio':
+            self.update_connections() # Update audio visualization
+            self.clear_highlights()   # Clear audio highlights
+            self.update_connection_buttons() # Update audio connect/disconnect buttons
+            # Highlight connected ports based on current audio selection
+            self._highlight_connected_ports(current_audio_input_port, current_audio_output_port, is_midi=False)
+        elif self.port_type == 'midi':
+            self.update_midi_connections() # Update midi visualization
+            self.clear_midi_highlights()   # Clear midi highlights
+            self.update_midi_connection_buttons() # Update midi connect/disconnect buttons
+            # Highlight connected ports based on current midi selection
+            self._highlight_connected_ports(current_midi_input_port, current_midi_output_port, is_midi=True)
+
+
         # Maintain collapse state after refresh if collapse all is enabled
+        # This needs to apply to the *current* trees based on the active tab
         if hasattr(self, 'collapse_all_checkbox') and self.collapse_all_checkbox.isChecked():
             self.apply_collapse_state_to_current_trees()
+
 
     # Add a new helper method to apply collapse state only to the current tab's trees
     def apply_collapse_state_to_current_trees(self):
@@ -1196,22 +1656,28 @@ class JackConnectionManager(QMainWindow):
         input_ports = []
         output_ports = []
         try:
-            # Get input ports
-            ports = self.client.get_ports(is_input=True, is_midi=is_midi)
-            input_ports = [port.name for port in ports if port is not None]
+            # Get input port objects
+            input_port_objects = self.client.get_ports(is_input=True, is_midi=is_midi)
 
-            # Get output ports
-            ports = self.client.get_ports(is_output=True, is_midi=is_midi)
-            output_ports = [port.name for port in ports if port is not None]
+            # Get output port objects
+            output_port_objects = self.client.get_ports(is_output=True, is_midi=is_midi)
 
-            # Additional MIDI filtering for safety
-            if is_midi:
-                input_ports = [p for p in input_ports if 'midi' in p.lower()]
-                output_ports = [p for p in output_ports if 'midi' in p.lower()]
+            # Explicitly filter for the Audio tab (is_midi=False)
+            # Ensure only ports reported as non-MIDI by the port object itself are included.
+            if not is_midi:
+                input_port_objects = [p for p in input_port_objects if p is not None and not p.is_midi]
+                output_port_objects = [p for p in output_port_objects if p is not None and not p.is_midi]
             else:
-                input_ports = [p for p in input_ports if 'midi' not in p.lower()]
-                output_ports = [p for p in output_ports if 'midi' not in p.lower()]
+                # For MIDI tab, just ensure ports are not None
+                input_port_objects = [p for p in input_port_objects if p is not None]
+                output_port_objects = [p for p in output_port_objects if p is not None]
 
+
+            # Extract names from the filtered objects
+            input_ports = [p.name for p in input_port_objects]
+            output_ports = [p.name for p in output_port_objects]
+
+            # Sort the names
             input_ports = self._sort_ports(input_ports)
             output_ports = self._sort_ports(output_ports)
         except jack.JackError as e:
@@ -1741,6 +2207,10 @@ class JackConnectionManager(QMainWindow):
         # Stop pw-top process before closing
         if hasattr(self, 'pw_process') and self.pw_process is not None:
             self.stop_pwtop_process()
+
+        # Stop latency test process before closing
+        if hasattr(self, 'latency_process') and self.latency_process is not None:
+            self.stop_latency_test()
 
 def main():
     # Redirect stderr to /dev/null to suppress JACK callback errors (redundant, but kept for safety):
