@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QSystemTrayIcon, QMenu)
 
 # --- Application Version ---
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.9.0"
 # -------------------------
 
 class AutostartManager:
