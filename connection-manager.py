@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
                              QGraphicsPathItem, QCheckBox, QMenu, QSizePolicy, QSpacerItem,
-                             QButtonGroup, QTextEdit, QTreeWidget, QTreeWidgetItem)
+                             QButtonGroup, QTextEdit, QTreeWidget, QTreeWidgetItem, QLineEdit) # Added QLineEdit here
 from PyQt6.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect, QProcess, pyqtSignal, QPoint
 from PyQt6.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
                          QPainterPath, QFontMetrics, QFont, QAction, QPixmap, QGuiApplication)
@@ -19,12 +19,12 @@ def custom_unraisable_hook(unraisable):
     Custom handler for unraisable exceptions that filters out JACK callback errors
     """
     # Check if this is a JACK callback error we want to suppress
-    if (isinstance(unraisable.exc_value, AssertionError) and 
+    if (isinstance(unraisable.exc_value, AssertionError) and
         'callback_wrapper' in str(unraisable.err_msg) and
         'jack.py' in str(unraisable.err_msg)):
         # Silently ignore these specific JACK callback assertion errors
         return
-    
+
     # For other unraisable exceptions, use the default handler
     sys.__unraisablehook__(unraisable)
 
@@ -90,7 +90,7 @@ class ElidedListWidgetItem(QListWidgetItem):
 class PortTreeWidget(QTreeWidget):
     """A tree widget for displaying ports with collapsible groups"""
     itemDragged = pyqtSignal(QTreeWidgetItem)
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -120,7 +120,7 @@ class PortTreeWidget(QTreeWidget):
     def addPort(self, port_name):
         # Extract group name (everything before the colon)
         group_name = port_name.split(':', 1)[0] if ':' in port_name else "Ungrouped"
-        
+
         # Create group if it doesn't exist
         if group_name not in self.port_groups:
             group_item = QTreeWidgetItem(self)
@@ -128,13 +128,13 @@ class PortTreeWidget(QTreeWidget):
             group_item.setFlags(group_item.flags() | Qt.ItemFlag.ItemIsAutoTristate)
             group_item.setExpanded(True)  # Expanded by default
             self.port_groups[group_name] = group_item
-        
+
         # Add port as child of group
         port_item = QTreeWidgetItem(self.port_groups[group_name])
         port_item.setText(0, port_name)
         port_item.setData(0, Qt.ItemDataRole.UserRole, port_name)  # Store full port name
         self.port_items[port_name] = port_item
-        
+
         return port_item
 
     def clear(self):
@@ -147,12 +147,12 @@ class PortTreeWidget(QTreeWidget):
         group_item = self.port_groups.get(group_name)
         if group_item:
             group_item.setExpanded(expand)
-            
+
     def expandAllGroups(self):
         """Expand all port groups"""
         for group_item in self.port_groups.values():
             group_item.setExpanded(True)
-            
+
     def collapseAllGroups(self):
         """Collapse all port groups"""
         for group_item in self.port_groups.values():
@@ -166,31 +166,31 @@ class PortTreeWidget(QTreeWidget):
                 port_name = item.data(0, Qt.ItemDataRole.UserRole)
                 menu = QMenu(self)
                 disconnect_action = QAction("Disconnect all", self)
-                disconnect_action.triggered.connect(lambda checked, name=port_name: 
+                disconnect_action.triggered.connect(lambda checked, name=port_name:
                                                   self.window().disconnect_node(name))
                 menu.addAction(disconnect_action)
                 menu.exec(self.mapToGlobal(position))
             else:  # Group item
                 group_name = item.text(0)
                 is_expanded = item.isExpanded()
-                
+
                 menu = QMenu(self)
-                
+
                 # Toggle expand/collapse for this specific group
                 toggle_action = QAction("Collapse group" if is_expanded else "Expand group", self)
                 toggle_action.triggered.connect(lambda: item.setExpanded(not is_expanded))
-                
+
                 # Actions for all groups
                 expand_all_action = QAction("Expand all", self)
                 collapse_all_action = QAction("Collapse all", self)
                 expand_all_action.triggered.connect(self.expandAllGroups)
                 collapse_all_action.triggered.connect(self.collapseAllGroups)
-                
+
                 menu.addAction(toggle_action)
                 menu.addSeparator()
                 menu.addAction(expand_all_action)
                 menu.addAction(collapse_all_action)
-                
+
                 menu.exec(self.mapToGlobal(position))
 
     def getSelectedPortName(self):
@@ -199,7 +199,7 @@ class PortTreeWidget(QTreeWidget):
         if item and item.childCount() == 0:  # It's a port item, not a group
             return item.data(0, Qt.ItemDataRole.UserRole)
         return None
-        
+
     def getPortItemByName(self, port_name):
         """Returns the tree item for a given port name"""
         return self.port_items.get(port_name)
@@ -231,7 +231,7 @@ class PortTreeWidget(QTreeWidget):
             # Store the current mouse press position
             self.mousePressPos = event.pos()
         super().mousePressEvent(event)
-        
+
     def mouseMoveEvent(self, event):
         """Custom mouse move event to help with drag detection"""
         if event.buttons() & Qt.MouseButton.LeftButton and self.initialSelection and self.mousePressPos:
@@ -248,7 +248,7 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
         # Allow both drag and drop for bidirectional connections
         self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)
         self.setAcceptDrops(True)
-        
+
     def startDrag(self, supportedActions=None):
         """Start drag operation with port name as data"""
         item = self.currentItem() or self.initialSelection
@@ -257,10 +257,10 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
             mime_data = QMimeData()
             mime_data.setText(port_name)
             mime_data.setData("application/x-port-role", b"output")
-            
+
             drag = QDrag(self)
             drag.setMimeData(mime_data)
-            
+
             # Add visual feedback
             pixmap = item.icon(0).pixmap(32, 32) if item.icon(0) else None
             if not pixmap or pixmap.isNull():
@@ -270,10 +270,10 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
                 painter.setPen(self.palette().color(QPalette.ColorRole.Text))
                 painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, item.text(0))
                 painter.end()
-            
+
             drag.setPixmap(pixmap)
             drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
-            
+
             result = drag.exec(Qt.DropAction.CopyAction)
             self.initialSelection = None
 
@@ -291,7 +291,7 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
         if not event.mimeData().hasFormat("application/x-port-role"):
             event.ignore()
             return
-            
+
         item = self.itemAt(event.position().toPoint())
         if item and item != self.current_drag_highlight_item and item.childCount() == 0:
             self.window().clear_drop_target_highlight(self)
@@ -310,12 +310,12 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
         if not event.mimeData().hasFormat("application/x-port-role"):
             event.ignore()
             return
-            
+
         role = event.mimeData().data("application/x-port-role")
         if role != b"input":
             event.ignore()
             return
-            
+
         input_name = event.mimeData().text()
         item = self.itemAt(event.position().toPoint())
         if item and item.childCount() == 0:
@@ -324,7 +324,7 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
             event.acceptProposedAction()
         else:
             event.ignore()
-            
+
         self.window().clear_drop_target_highlight(self)
         self.current_drag_highlight_item = None
 
@@ -343,10 +343,10 @@ class DropPortTreeWidget(PortTreeWidget):  # Input Tree
             mime_data = QMimeData()
             mime_data.setText(port_name)
             mime_data.setData("application/x-port-role", b"input")
-            
+
             drag = QDrag(self)
             drag.setMimeData(mime_data)
-            
+
             # Add visual feedback
             pixmap = item.icon(0).pixmap(32, 32) if item.icon(0) else None
             if not pixmap or pixmap.isNull():
@@ -356,10 +356,10 @@ class DropPortTreeWidget(PortTreeWidget):  # Input Tree
                 painter.setPen(self.palette().color(QPalette.ColorRole.Text))
                 painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, item.text(0))
                 painter.end()
-            
+
             drag.setPixmap(pixmap)
             drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
-            
+
             result = drag.exec(Qt.DropAction.CopyAction)
             self.initialSelection = None
 
@@ -377,7 +377,7 @@ class DropPortTreeWidget(PortTreeWidget):  # Input Tree
         if not event.mimeData().hasFormat("application/x-port-role"):
             event.ignore()
             return
-            
+
         item = self.itemAt(event.position().toPoint())
         if item and item != self.current_drag_highlight_item and item.childCount() == 0:
             self.window().clear_drop_target_highlight(self)
@@ -396,12 +396,12 @@ class DropPortTreeWidget(PortTreeWidget):  # Input Tree
         if not event.mimeData().hasFormat("application/x-port-role"):
             event.ignore()
             return
-            
+
         role = event.mimeData().data("application/x-port-role")
         if role != b"output":
             event.ignore()
             return
-            
+
         output_name = event.mimeData().text()
         item = self.itemAt(event.position().toPoint())
         if item and item.childCount() == 0:
@@ -410,7 +410,7 @@ class DropPortTreeWidget(PortTreeWidget):  # Input Tree
             event.acceptProposedAction()
         else:
             event.ignore()
-            
+
         self.window().clear_drop_target_highlight(self)
         self.current_drag_highlight_item = None
 
@@ -424,16 +424,16 @@ class ConnectionView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.refresh_timer = QTimer()
-        
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.fitInView(self.scene().sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-        
+
     def start_refresh_timer(self, callback, interval=1):
         """Start the timer to refresh connections visualization"""
         self.refresh_timer.timeout.connect(callback)
         self.refresh_timer.start(interval)
-        
+
     def stop_refresh_timer(self):
         """Stop the refresh timer"""
         self.refresh_timer.stop()
@@ -490,17 +490,24 @@ class JackConnectionManager(QMainWindow):
         self.dark_mode = self.is_dark_mode()
         self.setup_colors()
         self.callbacks_enabled = True
-        
+
+        # Create filter edit widgets (will be placed in bottom layout later)
+        self.output_filter_edit = QLineEdit()
+        self.output_filter_edit.setPlaceholderText("Filter outputs...")
+        self.input_filter_edit = QLineEdit()
+        self.input_filter_edit.setPlaceholderText("Filter inputs...")
+        # Removed redundant MIDI filter edits - use the main ones above
+
         # Set up JACK port registration callbacks
         self.client.set_port_registration_callback(self._handle_port_registration)
-        
+
         # Connect signals to refresh methods
         self.port_registered.connect(self._on_port_registered)
         self.port_unregistered.connect(self._on_port_unregistered)
 
         # Detect Flatpak environment
         self.flatpak_env = os.path.exists('/.flatpak-info')
-        
+
         # Initialize process for pw-top and output buffer
         self.pw_process = None
         self.pwtop_buffer = ""  # Buffer to store pw-top output
@@ -527,19 +534,17 @@ class JackConnectionManager(QMainWindow):
         self.tab_widget.currentChanged.connect(self.switch_tab)
 
         self.setup_bottom_layout(main_layout)
-        
+
         # Initialize the startup refresh timer
         self.startup_refresh_timer = QTimer()
         self.startup_refresh_timer.timeout.connect(self.startup_refresh)
         self.startup_refresh_count = 0
 
-        # Start visualization refresh timers
-        self.connection_view.start_refresh_timer(self.refresh_visualizations)
-        self.midi_connection_view.start_refresh_timer(self.refresh_visualizations)
+        # Visualization refresh timers will be started conditionally later based on config
 
         # Activate JACK client and start refresh sequence
         self.client.activate()
-        
+
         # Start the rapid refresh sequence immediately
         self.start_startup_refresh()
 
@@ -552,26 +557,26 @@ class JackConnectionManager(QMainWindow):
         """Handle the rapid refresh sequence"""
         # Remember original port type
         original_port_type = self.port_type
-        
+
         # First refresh audio ports
         self.port_type = 'audio'
         self.refresh_ports()
-        
+
         # Then refresh MIDI ports
         self.port_type = 'midi'
         self.refresh_ports()
-        
+
         # Restore original port type
         self.port_type = original_port_type
-        
+
         # Update current tab's view
         self.refresh_visualizations()
-        
+
         # Increment counter and stop timer if done
         self.startup_refresh_count += 1
         if self.startup_refresh_count >= 3:
             self.startup_refresh_timer.stop()
-            
+
             # Apply collapse state after startup refresh is complete
             if hasattr(self, 'collapse_all_checkbox') and self.collapse_all_checkbox.isChecked():
                 self.apply_collapse_state_to_all_trees()
@@ -579,9 +584,9 @@ class JackConnectionManager(QMainWindow):
     def setup_pwtop_tab(self, tab_widget):
         """Set up the pw-top statistics tab"""
         layout = QVBoxLayout(tab_widget)
-        
+
         # Create text display widget
-        self.pwtop_text = QTextEdit()        
+        self.pwtop_text = QTextEdit()
         self.pwtop_text.setReadOnly(True)
         self.pwtop_text.setStyleSheet(f"""
             QTextEdit {{
@@ -591,9 +596,9 @@ class JackConnectionManager(QMainWindow):
                 font-size: 13pt;
             }}
         """)
-        
+
         layout.addWidget(self.pwtop_text)
-        
+
         # Start pw-top process when tab is created
         self.start_pwtop_process()
 
@@ -601,7 +606,7 @@ class JackConnectionManager(QMainWindow):
         """Start the pw-top process in batch mode"""
         if self.pw_process is None:
             self.pw_process = QProcess()
-            
+
             if self.flatpak_env:
                 self.pw_process.setProgram("flatpak-spawn")
                 self.pw_process.setArguments(["--host", "pw-top", "-b"])
@@ -624,14 +629,14 @@ class JackConnectionManager(QMainWindow):
 
             # Terminate gracefully first
             self.pw_process.terminate()
-            
+
             # Give it some time to terminate gracefully
             if not self.pw_process.waitForFinished(1000):
                 # Force kill if it doesn't terminate
                 self.pw_process.kill()
                 self.pw_process.waitForFinished()
             self.pw_process = None
-            
+
     def handle_pwtop_output(self):
         """Handle new output from pw-top"""
         if self.pw_process is not None:
@@ -639,14 +644,14 @@ class JackConnectionManager(QMainWindow):
             if data:
                 # Append new data to buffer
                 self.pwtop_buffer += data
-                
+
                 # Extract complete cycle
                 complete_cycle = self.extract_latest_complete_cycle()
-                
+
                 # Update our stored complete cycle if we found a new one
                 if complete_cycle:
                     self.last_complete_cycle = complete_cycle
-                
+
                 # Always display the latest known complete cycle
                 if self.last_complete_cycle:
                     self.pwtop_text.setText(self.last_complete_cycle)
@@ -683,16 +688,16 @@ class JackConnectionManager(QMainWindow):
         # Need at least 2 headers to identify a complete cycle
         if len(header_indices) < 2:
             return None
-            
+
         # Extract section between last two headers
         start_idx = header_indices[-2]
         end_idx = header_indices[-1]
         section = lines[start_idx:end_idx]
-        
+
         # Basic validation - should have some minimum content
         if len(section) < 3:
             return None
-            
+
         return '\n'.join(section)
 
     def update_pwtop_output(self):
@@ -729,8 +734,13 @@ class JackConnectionManager(QMainWindow):
 
         input_layout.addWidget(input_label)
         input_layout.addWidget(input_tree)
+        # Input filter box (self.input_filter_edit/self.midi_input_filter_edit) created in __init__
+
+
         output_layout.addWidget(output_label)
         output_layout.addWidget(output_tree)
+        # Output filter box (self.output_filter_edit/self.midi_output_filter_edit) created in __init__
+
 
         middle_layout = QVBoxLayout()
         button_layout = QHBoxLayout()
@@ -765,12 +775,22 @@ class JackConnectionManager(QMainWindow):
             self.connect_button = connect_button
             self.disconnect_button = disconnect_button
             self.refresh_button = refresh_button
-            
+            # References (self.input_filter_edit, self.output_filter_edit) created in __init__
+
             input_tree.itemClicked.connect(self.on_input_clicked)
             output_tree.itemClicked.connect(self.on_output_clicked)
             connect_button.clicked.connect(self.make_connection_selected)
             disconnect_button.clicked.connect(self.break_connection_selected)
             refresh_button.clicked.connect(self.refresh_ports)
+            # Connect filter signals using instance attributes to a new handler
+            # Disconnect previous connections first to avoid duplicates if setup is called multiple times (unlikely but safe)
+            try: self.input_filter_edit.textChanged.disconnect()
+            except TypeError: pass # No connection existed
+            try: self.output_filter_edit.textChanged.disconnect()
+            except TypeError: pass # No connection existed
+
+            self.input_filter_edit.textChanged.connect(self._handle_filter_change)
+            self.output_filter_edit.textChanged.connect(self._handle_filter_change)
         elif port_type == 'midi':
             self.midi_input_tree = input_tree
             self.midi_output_tree = output_tree
@@ -778,22 +798,24 @@ class JackConnectionManager(QMainWindow):
             self.midi_connection_view = connection_view
             self.midi_connect_button = connect_button
             self.midi_disconnect_button = disconnect_button
-            
+            # References (self.midi_input_filter_edit, self.midi_output_filter_edit) created in __init__
+
             input_tree.itemClicked.connect(self.on_midi_input_clicked)
             output_tree.itemClicked.connect(self.on_midi_output_clicked)
             connect_button.clicked.connect(self.make_midi_connection_selected)
             disconnect_button.clicked.connect(self.break_midi_connection_selected)
             refresh_button.clicked.connect(self.refresh_ports)
+            # Filter signals are connected in the 'audio' block to the shared handler
 
     def setup_bottom_layout(self, main_layout):
         bottom_layout = QHBoxLayout()
-        
+
         # Auto Refresh checkbox
         self.auto_refresh_checkbox = QCheckBox('Auto Refresh')
         # Load auto refresh state from config
         auto_refresh_enabled = self.config_manager.get_bool('auto_refresh_enabled', True)
         self.auto_refresh_checkbox.setChecked(auto_refresh_enabled)
-        
+
         # Collapse All toggle
         self.collapse_all_checkbox = QCheckBox('Collapse All')
         # Load collapse all state from config
@@ -812,12 +834,37 @@ class JackConnectionManager(QMainWindow):
             button.setStyleSheet(self.button_stylesheet())
             button.setEnabled(False)
 
-        bottom_layout.addStretch()
+        # Define style for filter edits
+        filter_style = f"""
+            QLineEdit {{
+                background-color: {self.background_color.name()};
+                color: {self.text_color.name()};
+                border: 1px solid {self.text_color.name()};
+                padding: 2px;
+                border-radius: 3px;
+            }}
+        """
+        # Use the filter edits created in setup_port_tab
+        # Apply style and fixed width
+        if hasattr(self, 'output_filter_edit'):
+            self.output_filter_edit.setStyleSheet(filter_style)
+            self.output_filter_edit.setClearButtonEnabled(True) # Add clear button
+            self.output_filter_edit.setFixedWidth(150)
+            bottom_layout.addWidget(self.output_filter_edit) # Add output filter to the far left
+
+        bottom_layout.addStretch(1) # Push central controls away from left filter
         bottom_layout.addWidget(self.auto_refresh_checkbox)
         bottom_layout.addWidget(self.collapse_all_checkbox)
         bottom_layout.addWidget(self.undo_button)
         bottom_layout.addWidget(self.redo_button)
-        bottom_layout.addStretch()
+        bottom_layout.addStretch(1) # Push input filter away from central controls
+
+        if hasattr(self, 'input_filter_edit'):
+            self.input_filter_edit.setStyleSheet(filter_style)
+            self.input_filter_edit.setClearButtonEnabled(True) # Add clear button
+            self.input_filter_edit.setFixedWidth(150)
+            bottom_layout.addWidget(self.input_filter_edit) # Add input filter to the far right
+
         main_layout.addLayout(bottom_layout)
 
         self.auto_refresh_checkbox.stateChanged.connect(self.toggle_auto_refresh)
@@ -826,11 +873,16 @@ class JackConnectionManager(QMainWindow):
 
         # Initialize callback state from config
         self.callbacks_enabled = auto_refresh_enabled
-        
+
         # Initialize visibility based on current tab
         # This ensures controls are hidden if we start directly on pw-top tab
         current_tab = self.tab_widget.currentIndex() if hasattr(self, 'tab_widget') else 0
         self.show_bottom_controls(current_tab < 2)
+
+        # Start visualization timers if auto-refresh is enabled in config
+        if auto_refresh_enabled:
+            self.connection_view.start_refresh_timer(self.refresh_visualizations)
+            self.midi_connection_view.start_refresh_timer(self.refresh_visualizations)
 
     # Add new method to apply collapse state to all trees
     def apply_collapse_state_to_all_trees(self):
@@ -855,17 +907,17 @@ class JackConnectionManager(QMainWindow):
                 self.midi_input_tree.expandAllGroups()
             if hasattr(self, 'midi_output_tree'):
                 self.midi_output_tree.expandAllGroups()
-        
+
         # Update visualizations
         self.refresh_visualizations()
 
     def toggle_collapse_all(self, state):
         """Handle collapse all toggle state change"""
         is_checked = int(state) == 2  # Qt.CheckState.Checked equals 2
-        
+
         # Apply to all trees
         self.apply_collapse_state_to_all_trees()
-        
+
         # Save state to config
         self.config_manager.set_bool('collapse_all_enabled', is_checked)
 
@@ -874,19 +926,19 @@ class JackConnectionManager(QMainWindow):
             if hasattr(self, 'pw_process') and self.pw_process is not None:
                 self.stop_pwtop_process()  # Stop pw-top when switching away
             self.port_type = 'audio' if index == 0 else 'midi'
-            
+
             # Apply collapse state when switching tabs
             self.apply_collapse_state_to_all_trees()
-            
+
             # Refresh the visualization immediately on tab switch
             self.refresh_visualizations()
-            
+
             # Show bottom controls for non-pw-top tabs
             self.show_bottom_controls(True)
         elif index == 2:  # PipeWire Stats tab
             if self.pw_process is None:
                 self.start_pwtop_process()
-                
+
             # Hide bottom controls for pw-top tab
             self.show_bottom_controls(False)
 
@@ -900,6 +952,13 @@ class JackConnectionManager(QMainWindow):
             self.undo_button.setVisible(visible)
         if hasattr(self, 'redo_button'):
             self.redo_button.setVisible(visible)
+        # Also show/hide the filter edits
+        if hasattr(self, 'output_filter_edit'):
+            self.output_filter_edit.setVisible(visible)
+        if hasattr(self, 'input_filter_edit'):
+            self.input_filter_edit.setVisible(visible)
+        # Removed references to non-existent MIDI filter edits
+
 
     def _handle_port_registration(self, port, register: bool):
         """JACK callback for port registration events. This runs in JACK's thread."""
@@ -907,12 +966,12 @@ class JackConnectionManager(QMainWindow):
             # If port is None or not fully initialized, skip processing
             if port is None:
                 return
-                
+
             # Check if the port object has the required attributes before accessing them
             # This will avoid the AssertionError in jack.py's _wrap_port_ptr
             port_name = None
             is_input = False
-            
+
             # Use hasattr checks first to avoid triggering AttributeErrors
             if hasattr(port, 'name'):
                 try:
@@ -922,7 +981,7 @@ class JackConnectionManager(QMainWindow):
                         return
                 except Exception:
                     return
-                    
+
             if hasattr(port, 'is_input'):
                 try:
                     is_input = port.is_input
@@ -963,6 +1022,15 @@ class JackConnectionManager(QMainWindow):
     def toggle_auto_refresh(self, state):
         is_checked = int(state) == 2  # Qt.CheckState.Checked equals 2
         self.callbacks_enabled = is_checked
+
+        # Start or stop visualization timers based on state
+        if is_checked:
+            self.connection_view.start_refresh_timer(self.refresh_visualizations)
+            self.midi_connection_view.start_refresh_timer(self.refresh_visualizations)
+        else:
+            self.connection_view.stop_refresh_timer()
+            self.midi_connection_view.stop_refresh_timer()
+
         # Save state to config
         self.config_manager.set_bool('auto_refresh_enabled', is_checked)
 
@@ -1005,61 +1073,77 @@ class JackConnectionManager(QMainWindow):
         if self.port_type == 'audio':
             current_input_port = self.input_tree.getSelectedPortName() if hasattr(self, 'input_tree') else None
             current_output_port = self.output_tree.getSelectedPortName() if hasattr(self, 'output_tree') else None
-            
+            current_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
+            current_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
+
             self.input_tree.clear()
             self.output_tree.clear()
-            
+
             input_ports, output_ports = self._get_ports(is_midi=False)
-            
+
             for input_port in input_ports:
                 self.input_tree.addPort(input_port)
-                
+
             for output_port in output_ports:
                 self.output_tree.addPort(output_port)
-                
-            # Restore selection if ports still exist
+
+            # Re-apply filter after repopulating
+            self.filter_ports(self.input_tree, current_input_filter)
+            self.filter_ports(self.output_tree, current_output_filter)
+
+            # Restore selection if ports still exist and are visible
             if current_input_port and current_input_port in self.input_tree.port_items:
                 item = self.input_tree.port_items[current_input_port]
-                self.input_tree.setCurrentItem(item)
-                
+                if not item.isHidden():
+                    self.input_tree.setCurrentItem(item)
+
             if current_output_port and current_output_port in self.output_tree.port_items:
                 item = self.output_tree.port_items[current_output_port]
-                self.output_tree.setCurrentItem(item)
-                
+                if not item.isHidden():
+                    self.output_tree.setCurrentItem(item)
+
             self.update_connections()
             self.clear_highlights()
             self.update_connection_buttons()
             self._highlight_connected_ports(current_input_port, current_output_port, is_midi=False)
-            
+
         elif self.port_type == 'midi':
             current_input_port = self.midi_input_tree.getSelectedPortName() if hasattr(self, 'midi_input_tree') else None
             current_output_port = self.midi_output_tree.getSelectedPortName() if hasattr(self, 'midi_output_tree') else None
-            
+            current_input_filter = self.midi_input_filter_edit.text() if hasattr(self, 'midi_input_filter_edit') else ""
+            current_output_filter = self.midi_output_filter_edit.text() if hasattr(self, 'midi_output_filter_edit') else ""
+
             self.midi_input_tree.clear()
             self.midi_output_tree.clear()
-            
+
             input_ports, output_ports = self._get_ports(is_midi=True)
-            
+
             for input_port in input_ports:
                 self.midi_input_tree.addPort(input_port)
-                
+
             for output_port in output_ports:
                 self.midi_output_tree.addPort(output_port)
-                
-            # Restore selection if ports still exist
+
+            # Re-apply filter after repopulating
+            self.filter_ports(self.midi_input_tree, current_input_filter)
+            self.filter_ports(self.midi_output_tree, current_output_filter)
+
+            # Restore selection if ports still exist and are visible
             if current_input_port and current_input_port in self.midi_input_tree.port_items:
                 item = self.midi_input_tree.port_items[current_input_port]
-                self.midi_input_tree.setCurrentItem(item)
-                
+                if not item.isHidden():
+                    self.midi_input_tree.setCurrentItem(item)
+
             if current_output_port and current_output_port in self.midi_output_tree.port_items:
                 item = self.midi_output_tree.port_items[current_output_port]
-                self.midi_output_tree.setCurrentItem(item)
-                
+                if not item.isHidden():
+                    self.midi_output_tree.setCurrentItem(item)
+
             self.update_midi_connections()
             self.clear_midi_highlights()
             self.update_midi_connection_buttons()
             self._highlight_connected_ports(current_input_port, current_output_port, is_midi=True)
-        
+
         # Maintain collapse state after refresh if collapse all is enabled
         if hasattr(self, 'collapse_all_checkbox') and self.collapse_all_checkbox.isChecked():
             self.apply_collapse_state_to_current_trees()
@@ -1072,7 +1156,7 @@ class JackConnectionManager(QMainWindow):
                 self.input_tree.collapseAllGroups()
             elif hasattr(self, 'input_tree'):
                 self.input_tree.expandAllGroups()
-                
+
             if hasattr(self, 'output_tree') and self.collapse_all_checkbox.isChecked():
                 self.output_tree.collapseAllGroups()
             elif hasattr(self, 'output_tree'):
@@ -1082,7 +1166,7 @@ class JackConnectionManager(QMainWindow):
                 self.midi_input_tree.collapseAllGroups()
             elif hasattr(self, 'midi_input_tree'):
                 self.midi_input_tree.expandAllGroups()
-                
+
             if hasattr(self, 'midi_output_tree') and self.collapse_all_checkbox.isChecked():
                 self.midi_output_tree.collapseAllGroups()
             elif hasattr(self, 'midi_output_tree'):
@@ -1134,7 +1218,7 @@ class JackConnectionManager(QMainWindow):
             print(f"Error getting ports: {e}")
             # Return current lists even if incomplete
             pass
-        
+
         return input_ports, output_ports
 
     def _highlight_connected_ports(self, current_input_text, current_output_text, is_midi):
@@ -1192,7 +1276,7 @@ class JackConnectionManager(QMainWindow):
                 except jack.JackError:
                     # If we can't check connections, try the connect anyway
                     pass
-                    
+
                 self.client.connect(output_name, input_name)
                 self.connection_history.add_action('connect', output_name, input_name)
             else:
@@ -1299,31 +1383,31 @@ class JackConnectionManager(QMainWindow):
         port_item = tree_widget.port_items.get(port_name)
         if not port_item:
             return None
-            
+
         # Get the parent group item
         parent_group = port_item.parent()
         if not parent_group:
             return None
-            
+
         # Check if the parent group is expanded
         is_expanded = parent_group.isExpanded()
-        
+
         # If the group is collapsed, use the group's position instead
         target_item = port_item if is_expanded else parent_group
-        
+
         # Get the rectangle for the item
         rect = tree_widget.visualItemRect(target_item)
-        
+
         # If the rect has zero height (item not visible), return None
         if rect.height() <= 0:
             return None
-            
+
         is_output = tree_widget in (self.output_tree, self.midi_output_tree)
-        
+
         # Calculate the point at the middle-right or middle-left of the item
-        point = QPointF(tree_widget.viewport().width() if is_output else 0, 
+        point = QPointF(tree_widget.viewport().width() if is_output else 0,
                        rect.top() + rect.height() / 2)
-        
+
         viewport_point = tree_widget.viewport().mapToParent(point.toPoint())
         global_point = tree_widget.mapToGlobal(viewport_point)
         scene_point = connection_view.mapFromGlobal(global_point)
@@ -1334,11 +1418,11 @@ class JackConnectionManager(QMainWindow):
         return QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
     def update_connections(self):
-        self._update_connection_graphics(self.connection_scene, self.connection_view, 
+        self._update_connection_graphics(self.connection_scene, self.connection_view,
                                         self.output_tree, self.input_tree, is_midi=False)
 
     def update_midi_connections(self):
-        self._update_connection_graphics(self.midi_connection_scene, self.midi_connection_view, 
+        self._update_connection_graphics(self.midi_connection_scene, self.midi_connection_view,
                                         self.midi_output_tree, self.midi_input_tree, is_midi=True)
 
     def _update_connection_graphics(self, scene, view, output_tree, input_tree, is_midi):
@@ -1370,24 +1454,24 @@ class JackConnectionManager(QMainWindow):
             if start_pos and end_pos:
                 path = QPainterPath()
                 path.moveTo(start_pos)
-                
+
                 # Calculate control points for a smooth curve
                 ctrl1_x = start_pos.x() + (end_pos.x() - start_pos.x()) / 3
                 ctrl2_x = start_pos.x() + 2 * (end_pos.x() - start_pos.x()) / 3
-                
+
                 path.cubicTo(
                     QPointF(ctrl1_x, start_pos.y()),
                     QPointF(ctrl2_x, end_pos.y()),
                     end_pos
                 )
-                
+
                 # Use a consistent color for connections from the same source
                 base_name = output_name.rsplit(':', 1)[0]
-                
+
                 # Get a base random color
                 random.seed(base_name)
                 base_color = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-                
+
                 # Brighten the color in dark mode for better visibility
                 if self.dark_mode:
                     # Make colors more vibrant and brighter in dark mode
@@ -1396,12 +1480,12 @@ class JackConnectionManager(QMainWindow):
                     s = min(1.0, s * 1.4)  # Increase saturation by 40%
                     v = min(1.0, v * 1.3)  # Increase brightness by 30%
                     base_color.setHsvF(h, s, v, a)
-                
+
                 pen = QPen(base_color, 2)
                 path_item = QGraphicsPathItem(path)
                 path_item.setPen(pen)
                 scene.addItem(path_item)
-                
+
         # Fit the view to show all connections
         view.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
@@ -1423,7 +1507,7 @@ class JackConnectionManager(QMainWindow):
         if item.childCount() > 0:
             # This is a group item, not a port item
             return
-        
+
         if is_midi:
             self.clear_midi_highlights()
         else:
@@ -1544,11 +1628,11 @@ class JackConnectionManager(QMainWindow):
         self.update_midi_connections()
 
     def update_connection_buttons(self):
-        self._update_port_connection_buttons(self.input_tree, self.output_tree, 
+        self._update_port_connection_buttons(self.input_tree, self.output_tree,
                                            self.connect_button, self.disconnect_button)
 
     def update_midi_connection_buttons(self):
-        self._update_port_connection_buttons(self.midi_input_tree, self.midi_output_tree, 
+        self._update_port_connection_buttons(self.midi_input_tree, self.midi_output_tree,
                                            self.midi_connect_button, self.midi_disconnect_button)
 
     def _update_port_connection_buttons(self, input_tree, output_tree, connect_button, disconnect_button):
@@ -1558,16 +1642,75 @@ class JackConnectionManager(QMainWindow):
 
         if input_port and output_port:
             try:
-                connected = any(input_port == input_port_obj.name 
-                              for input_port_obj in self.client.get_all_connections(output_port))
-                disconnect_button.setEnabled(connected)
-                connect_button.setEnabled(not connected)
+                # Check visibility as well - can't connect/disconnect hidden ports
+                input_item = input_tree.getPortItemByName(input_port)
+                output_item = output_tree.getPortItemByName(output_port)
+                if input_item and output_item and not input_item.isHidden() and not output_item.isHidden():
+                    connected = any(input_port == input_port_obj.name
+                                  for input_port_obj in self.client.get_all_connections(output_port))
+                    disconnect_button.setEnabled(connected)
+                    connect_button.setEnabled(not connected)
+                else:
+                    disconnect_button.setEnabled(False)
+                    connect_button.setEnabled(False)
             except jack.JackError:
                 disconnect_button.setEnabled(False)
                 connect_button.setEnabled(False)
         else:
             disconnect_button.setEnabled(False)
             connect_button.setEnabled(False)
+
+    def _handle_filter_change(self):
+        """Handles text changes in the shared filter boxes."""
+        current_index = self.tab_widget.currentIndex()
+        input_text = self.input_filter_edit.text()
+        output_text = self.output_filter_edit.text()
+
+        if current_index == 0:  # Audio tab
+            if hasattr(self, 'input_tree'):
+                self.filter_ports(self.input_tree, input_text)
+            if hasattr(self, 'output_tree'):
+                self.filter_ports(self.output_tree, output_text)
+        elif current_index == 1:  # MIDI tab
+            if hasattr(self, 'midi_input_tree'):
+                self.filter_ports(self.midi_input_tree, input_text)
+            if hasattr(self, 'midi_output_tree'):
+                self.filter_ports(self.midi_output_tree, output_text)
+        # No filtering needed for pw-top tab (index 2)
+
+        # Refresh visualization after filtering
+        # Note: filter_ports itself calls refresh_visualizations, so this might be redundant,
+        # but keeping it here ensures visualization updates even if filter_ports logic changes.
+        # Update: Removed redundant call as filter_ports handles it.
+        # self.refresh_visualizations() # Redundant call removed
+
+    def filter_ports(self, tree_widget, filter_text):
+        """Filters the items in the specified tree widget based on the filter text."""
+        filter_text = filter_text.lower() # Case-insensitive filtering
+
+        # Iterate through all top-level items (groups)
+        for i in range(tree_widget.topLevelItemCount()):
+            group_item = tree_widget.topLevelItem(i)
+            group_visible = False # Assume group is hidden unless a child matches
+
+            # Iterate through children (ports) of the group
+            for j in range(group_item.childCount()):
+                port_item = group_item.child(j)
+                port_name = port_item.data(0, Qt.ItemDataRole.UserRole) # Get full port name
+
+                # Check if port name contains the filter text
+                if filter_text in port_name.lower():
+                    port_item.setHidden(False)
+                    group_visible = True # Make group visible if at least one child is visible
+                else:
+                    port_item.setHidden(True)
+
+            # Set the visibility of the group item
+            group_item.setHidden(not group_visible)
+
+        # After filtering, we need to refresh the connection visualization
+        # because hidden items might affect line drawing positions.
+        self.refresh_visualizations()
 
     def refresh_visualizations(self):
         """Refresh only the connection visualizations without refreshing ports"""
@@ -1594,7 +1737,7 @@ class JackConnectionManager(QMainWindow):
         # Stop the visualization refresh timers
         self.connection_view.stop_refresh_timer()
         self.midi_connection_view.stop_refresh_timer()
-        
+
         # Stop pw-top process before closing
         if hasattr(self, 'pw_process') and self.pw_process is not None:
             self.stop_pwtop_process()
@@ -1603,7 +1746,7 @@ def main():
     # Redirect stderr to /dev/null to suppress JACK callback errors (redundant, but kept for safety):
     if not os.environ.get('DEBUG_JACK_CALLBACKS'):
         sys.stderr = open(os.devnull, 'w')
-    
+
     app = QApplication(sys.argv)
     # Set the desktop filename for correct icon display in taskbar and window decorations
     QGuiApplication.setDesktopFileName("com.example.cable")

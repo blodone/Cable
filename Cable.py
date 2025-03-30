@@ -10,7 +10,7 @@ import shutil
 import requests
 from packaging import version
 import webbrowser # Might not be needed if setOpenExternalLinks works directly
-from PyQt6.QtCore import Qt, QTimer, QFile, QMargins, QProcess
+from PyQt6.QtCore import Qt, QTimer, QFile, QMargins, QProcess, QEvent
 from PyQt6.QtGui import QFont, QIcon, QGuiApplication, QActionGroup, QAction
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QLineEdit, QPushButton, QLabel,
@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QSystemTrayIcon, QMenu)
 
 # --- Application Version ---
-APP_VERSION = "0.7.3"
+APP_VERSION = "0.8.0"
 # -------------------------
 
 class AutostartManager:
@@ -636,6 +636,10 @@ class PipeWireSettingsApp(QWidget):
         if not self.isVisible():
             # Force refresh settings when showing from tray
             self.load_current_settings()
+            # Refresh device and node lists when shown from tray
+            print("Refreshing devices/nodes from handle_show_action") # Debug print
+            self.load_devices()
+            self.load_nodes()
             self.show()  # PyQt6: showNormal() is now show() for restoring
             self.activateWindow()
 
@@ -688,7 +692,10 @@ class PipeWireSettingsApp(QWidget):
             else:
                 if self.isMinimized() or not self.isVisible():
                     # Force refresh settings before showing
+                    print("Refreshing devices/nodes from tray_icon_activated") # Debug print
                     self.load_current_settings()
+                    self.load_devices()
+                    self.load_nodes()
                     self.show()  # Restore window if minimized
                     self.activateWindow()  # Bring window to the front
                 else:
