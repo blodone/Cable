@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QSystemTrayIcon, QMenu)
 
 # --- Application Version ---
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 # -------------------------
 
 class AutostartManager:
@@ -406,7 +406,10 @@ class PipeWireSettingsApp(QWidget):
 
         # Set the checkbox states
         self.tray_toggle_checkbox.setChecked(tray_enabled)
+        # Block signals temporarily while setting the state based on config
+        self.remember_settings_checkbox.blockSignals(True)
         self.remember_settings_checkbox.setChecked(self.remember_settings)
+        self.remember_settings_checkbox.blockSignals(False) # Unblock signals
         self.tray_click_opens_cables = tray_click_opens_cables
 
         if tray_enabled:
@@ -755,41 +758,6 @@ class PipeWireSettingsApp(QWidget):
 
     def closeEvent(self, event):
         # If remember settings is enabled, check if we need to save current values
-        if self.remember_settings and not self.initial_load:
-            config = configparser.ConfigParser()
-            config_path = os.path.expanduser("~/.config/cable/config.ini")
-            
-            if os.path.exists(config_path):
-                config.read(config_path)
-                
-                if 'DEFAULT' not in config:
-                    config['DEFAULT'] = {}
-                
-                # Only save non-reset values
-                current_quantum = self.quantum_combo.currentText()
-                if current_quantum and not self.quantum_was_reset:
-                    config['DEFAULT']['saved_quantum'] = current_quantum
-                    print(f"Saving quantum setting on close: {current_quantum}")
-                elif 'saved_quantum' in config['DEFAULT'] and self.quantum_was_reset:
-                    # If quantum was reset and there's a saved value, remove it
-                    del config['DEFAULT']['saved_quantum']
-                    print("Removing saved quantum setting on close due to reset")
-                
-                current_sample_rate = self.sample_rate_combo.currentText()
-                if current_sample_rate and not self.sample_rate_was_reset:
-                    config['DEFAULT']['saved_sample_rate'] = current_sample_rate
-                    print(f"Saving sample rate setting on close: {current_sample_rate}")
-                elif 'saved_sample_rate' in config['DEFAULT'] and self.sample_rate_was_reset:
-                    # If sample rate was reset and there's a saved value, remove it
-                    del config['DEFAULT']['saved_sample_rate']
-                    print("Removing saved sample rate setting on close due to reset")
-                
-                try:
-                    os.makedirs(os.path.dirname(config_path), exist_ok=True)
-                    with open(config_path, 'w') as configfile:
-                        config.write(configfile)
-                except Exception as e:
-                    print(f"Error saving settings on close: {e}")
         # Handle the tray icon and other close events as before
         if self.tray_enabled and self.tray_icon:
             event.ignore()
