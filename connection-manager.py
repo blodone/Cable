@@ -106,6 +106,8 @@ class PortTreeWidget(QTreeWidget):
         self.port_groups = {}  # Maps group names to group items
         self.port_items = {}   # Maps port names to port items
         self.setDragEnabled(True)
+        # Allow selecting multiple items with Ctrl/Shift
+        self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.setAcceptDrops(True)
         self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)  # Fixed: DragAndDrop → DragDrop
         self.setDefaultDropAction(Qt.DropAction.CopyAction)
@@ -167,7 +169,7 @@ class PortTreeWidget(QTreeWidget):
             if item.childCount() == 0:  # Port item
                 port_name = item.data(0, Qt.ItemDataRole.UserRole)
                 menu = QMenu(self)
-                disconnect_action = QAction("Disconnect all", self)
+                disconnect_action = QAction("Disconnect all from this port", self)
                 disconnect_action.triggered.connect(lambda checked, name=port_name:
                                                   self.window().disconnect_node(name))
                 menu.addAction(disconnect_action)
@@ -175,6 +177,16 @@ class PortTreeWidget(QTreeWidget):
             else:  # Group item
                 group_name = item.text(0)
                 is_expanded = item.isExpanded()
+                selected_items = self.selectedItems() # Get all selected items
+
+                # Determine if the right-clicked item is part of the current selection
+                is_current_item_selected = item in selected_items
+
+                # If the right-clicked item wasn't selected, treat it as the only selection for the context menu
+                target_items = selected_items if is_current_item_selected and len(selected_items) > 1 else [item]
+
+                # Filter to only include group items from the target items
+                target_group_items = [i for i in target_items if i.childCount() > 0]
 
                 menu = QMenu(self)
 
@@ -188,19 +200,31 @@ class PortTreeWidget(QTreeWidget):
                 expand_all_action.triggered.connect(self.expandAllGroups)
                 collapse_all_action.triggered.connect(self.collapseAllGroups)
 
+                # Action to disconnect all ports within the selected group(s)
+                disconnect_group_action = QAction(f"Disconnect group{'s' if len(target_group_items) > 1 else ''}", self)
+                # Disable if no actual group items are targeted (shouldn't happen with current logic, but safe)
+                disconnect_group_action.setEnabled(bool(target_group_items))
+                disconnect_group_action.triggered.connect(lambda: self.window().disconnect_selected_groups(target_group_items))
+
                 menu.addAction(toggle_action)
                 menu.addSeparator()
                 menu.addAction(expand_all_action)
                 menu.addAction(collapse_all_action)
+                menu.addSeparator()
+                menu.addAction(disconnect_group_action)
 
                 menu.exec(self.mapToGlobal(position))
 
-    def getSelectedPortName(self):
-        """Returns the port name of the currently selected item, or None if no port is selected"""
-        item = self.currentItem()
-        if item and item.childCount() == 0:  # It's a port item, not a group
-            return item.data(0, Qt.ItemDataRole.UserRole)
-        return None
+    def getSelectedPortNames(self):
+        """Returns a list of port names for the currently selected port items."""
+        selected_ports = []
+        for item in self.selectedItems():
+            # Only include actual port items (leaves), not groups
+            if item and item.childCount() == 0:
+                port_name = item.data(0, Qt.ItemDataRole.UserRole)
+                if port_name:
+                    selected_ports.append(port_name)
+        return selected_ports
 
     def getPortItemByName(self, port_name):
         """Returns the tree item for a given port name"""
@@ -228,11 +252,18 @@ class PortTreeWidget(QTreeWidget):
 
     def mousePressEvent(self, event):
         """Track initial item selection to improve drag operations"""
+        # Store the current mouse press position regardless of button
+        self.mousePressPos = event.pos()
+        item_at_pos = self.itemAt(event.pos())
+
         if event.button() == Qt.MouseButton.LeftButton:
-            self.initialSelection = self.itemAt(event.pos())
-            # Store the current mouse press position
-            self.mousePressPos = event.pos()
-        super().mousePressEvent(event)
+            self.initialSelection = item_at_pos # Remember item for potential drag start
+            # Always call the superclass method for left clicks.
+            # ExtendedSelection mode will interpret the Ctrl modifier correctly.
+            super().mousePressEvent(event)
+        else:
+            # Handle other mouse buttons (e.g., right-click for context menu)
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         """Custom mouse move event to help with drag detection"""
@@ -252,79 +283,204 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
         self.setAcceptDrops(True)
 
     def startDrag(self, supportedActions=None):
-        """Start drag operation with port name as data"""
-        item = self.currentItem() or self.initialSelection
-        if item and item.childCount() == 0:  # Only start drag for port items, not groups
-            port_name = item.data(0, Qt.ItemDataRole.UserRole)
-            mime_data = QMimeData()
-            mime_data.setText(port_name)
+        """Start drag operation with port name or group data"""
+        selected_items = self.selectedItems()
+        if not selected_items:
+            return
+
+        # Filter out group items if multiple items are selected
+        port_items = [item for item in selected_items if item.childCount() == 0]
+        group_items = [item for item in selected_items if item.childCount() > 0]
+
+        mime_data = QMimeData()
+        drag_text = ""
+
+        if len(port_items) > 1:
+            # Dragging multiple ports
+            port_names = [item.data(0, Qt.ItemDataRole.UserRole) for item in port_items if item.data(0, Qt.ItemDataRole.UserRole)]
+            if not port_names: return # No valid ports selected
+
+            mime_data.setData("application/x-port-list", b"true") # Indicate multiple ports
             mime_data.setData("application/x-port-role", b"output")
+            mime_data.setText('\n'.join(port_names)) # Store port list
+            drag_text = f"{len(port_names)} Output Ports" # Text for pixmap
 
-            drag = QDrag(self)
-            drag.setMimeData(mime_data)
+        elif len(port_items) == 1 and not group_items:
+            # Dragging a single port (original logic)
+            item = port_items[0]
+            port_name = item.data(0, Qt.ItemDataRole.UserRole)
+            if not port_name: return # Don't drag invalid items
 
-            # Add visual feedback
-            pixmap = item.icon(0).pixmap(32, 32) if item.icon(0) else None
-            if not pixmap or pixmap.isNull():
-                pixmap = QPixmap(70, 20)
-                pixmap.fill(Qt.GlobalColor.transparent)
-                painter = QPainter(pixmap)
-                painter.setPen(self.palette().color(QPalette.ColorRole.Text))
-                painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, item.text(0))
-                painter.end()
+            mime_data.setData("application/x-port-role", b"output")
+            mime_data.setText(port_name)
+            drag_text = item.text(0) # Use displayed text for pixmap
 
-            drag.setPixmap(pixmap)
-            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+        elif len(group_items) == 1 and not port_items:
+            # Dragging a single group (original logic)
+            item = group_items[0]
+            group_name = item.text(0)
+            port_list = self.window()._get_ports_in_group(item)
+            if not port_list: return # Don't drag empty groups
 
-            result = drag.exec(Qt.DropAction.CopyAction)
-            self.initialSelection = None
+            mime_data.setData("application/x-port-group", b"true")
+            mime_data.setData("application/x-port-role", b"output")
+            mime_data.setText('\n'.join(port_list)) # Store port list as newline-separated text
+            drag_text = group_name # Text for pixmap
+
+        else:
+            # Invalid selection for dragging (e.g., mixed ports and groups, or nothing valid)
+            return
+
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+
+        # Add visual feedback (using drag_text)
+        # Create a generic pixmap for drag feedback
+        font_metrics = QFontMetrics(self.font())
+        text_width = font_metrics.horizontalAdvance(drag_text) + 10 # Add padding
+        pixmap_width = max(70, text_width) # Ensure minimum width
+        pixmap = QPixmap(pixmap_width, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
+        # Use ElideRight if text is too long for the pixmap
+        elided_text = font_metrics.elidedText(drag_text, Qt.TextElideMode.ElideRight, pixmap_width)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, elided_text)
+        painter.end()
+
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+
+        result = drag.exec(Qt.DropAction.CopyAction)
+        self.initialSelection = None # Clear selection after drag finishes
 
     def dragEnterEvent(self, event):
         """Handle drag enter events to determine if drop should be accepted"""
-        if event.mimeData().hasText() and event.mimeData().hasFormat("application/x-port-role"):
-            role = event.mimeData().data("application/x-port-role")
-            if role == b"input":  # Only accept input ports for drops on output tree
+        mime_data = event.mimeData()
+        is_port_drop = mime_data.hasFormat("application/x-port-role")
+        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # New check
+        is_group_drop = mime_data.hasFormat("application/x-port-group")
+
+        # Accept if it's a single port, a list of ports, or a group, AND the role is input
+        if (is_port_drop or is_port_list_drop or is_group_drop):
+            role = mime_data.data("application/x-port-role")
+            if role == b"input":  # Only accept input ports/groups for drops on output tree
                 event.acceptProposedAction()
                 return
+
         event.ignore()
 
     def dragMoveEvent(self, event):
-        """Handle drag move events for visual feedback"""
-        if not event.mimeData().hasFormat("application/x-port-role"):
+        """Handle drag move events for visual feedback, supporting ports and groups."""
+        mime_data = event.mimeData()
+        is_port_drag = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
+        is_port_list_drag = mime_data.hasFormat("application/x-port-list") # Multiple ports
+        is_group_drag = mime_data.hasFormat("application/x-port-group")
+
+        # 1. Check if it's a valid drag type we handle (Input role)
+        if not (is_port_drag or is_port_list_drag or is_group_drag) or mime_data.data("application/x-port-role") != b"input":
             event.ignore()
+            # Clear highlight if needed
+            if self.current_drag_highlight_item:
+                self.window().clear_drop_target_highlight(self)
+                self.current_drag_highlight_item = None
             return
 
-        item = self.itemAt(event.position().toPoint())
-        if item and item != self.current_drag_highlight_item and item.childCount() == 0:
-            self.window().clear_drop_target_highlight(self)
-            self.window().highlight_drop_target_item(self, item)
-            self.current_drag_highlight_item = item
-            event.acceptProposedAction()
-        elif not item or item.childCount() > 0:
-            self.window().clear_drop_target_highlight(self)
-            self.current_drag_highlight_item = None
-            event.ignore()
+        # 2. Get item under cursor (Target item in Output tree)
+        target_item = self.itemAt(event.position().toPoint())
+
+        # 3. Determine if the target item is a valid drop target for the current drag source
+        # Now, any target (port or group) is valid if the source is an Input port/group/list
+        is_valid_target = bool(target_item)
+
+        # 4. Handle highlighting and accepting/ignoring
+        if is_valid_target:
+            if target_item != self.current_drag_highlight_item:
+                self.window().clear_drop_target_highlight(self)
+                self.window().highlight_drop_target_item(self, target_item) # Highlight the valid target
+                self.current_drag_highlight_item = target_item
+            event.acceptProposedAction() # Accept move over valid target
         else:
-            event.acceptProposedAction()
+            # Invalid target or no item under cursor
+            if self.current_drag_highlight_item: # Clear highlight if there was one
+                self.window().clear_drop_target_highlight(self)
+                self.current_drag_highlight_item = None
+            event.ignore() # Ignore move over invalid target
 
     def dropEvent(self, event):
-        """Handle drop events to create connections"""
-        if not event.mimeData().hasFormat("application/x-port-role"):
+        """Handle drop events to create connections for ports or groups."""
+        mime_data = event.mimeData()
+        is_port_drop = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
+        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # Multiple ports
+        is_group_drop = mime_data.hasFormat("application/x-port-group")
+
+        # 1. Check validity (Source must be Input)
+        if not (is_port_drop or is_port_list_drop or is_group_drop) or mime_data.data("application/x-port-role") != b"input":
             event.ignore()
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
             return
 
-        role = event.mimeData().data("application/x-port-role")
-        if role != b"input":
+        # 2. Get target item (Output tree)
+        target_item = self.itemAt(event.position().toPoint())
+        if not target_item:
             event.ignore()
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
             return
 
-        input_name = event.mimeData().text()
-        item = self.itemAt(event.position().toPoint())
-        if item and item.childCount() == 0:
-            output_name = item.data(0, Qt.ItemDataRole.UserRole)
-            self.window().make_connection(output_name, input_name)
+        is_target_group = target_item.childCount() > 0
+        target_ports = []
+        if is_target_group:
+            target_ports = self.window()._get_ports_in_group(target_item)
+        else:
+            target_port_name = target_item.data(0, Qt.ItemDataRole.UserRole)
+            if target_port_name:
+                target_ports = [target_port_name] # Treat single port as list
+
+        if not target_ports: # No valid target port(s) found
+            event.ignore()
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
+            return
+
+        # 3. Get source ports (Input)
+        source_ports = mime_data.text().split('\n')
+        # Filter out empty strings that might result from splitting
+        source_ports = [port for port in source_ports if port]
+        if not source_ports: # No valid source ports
+             event.ignore()
+             self.window().clear_drop_target_highlight(self)
+             self.current_drag_highlight_item = None
+             return
+
+        # 4. Perform connection based on source and target types
+        connection_made = False
+        # Check for single port -> single port case
+        if not is_group_drop and not is_port_list_drop and not is_target_group and len(source_ports) == 1 and len(target_ports) == 1:
+             # Single Input Port -> Single Output Port
+             output_name = target_ports[0]
+             input_name = source_ports[0]
+             print(f"Connecting single: {output_name} -> {input_name}")
+             self.window().make_connection(output_name, input_name)
+             connection_made = True
+        # Check for cases involving groups or multiple ports
+        elif (is_group_drop or is_port_list_drop or is_target_group):
+             # Use make_multiple_connections for Group->Port, Port->Group, Group->Group, List->Port, List->Group
+             print(f"Connecting multiple/group: Outputs={target_ports}, Inputs={source_ports}")
+             self.window().make_multiple_connections(target_ports, source_ports)
+             connection_made = True
+        else:
+             # This case might occur if logic above is flawed, or unexpected drop type
+             print(f"Warning: Unhandled drop scenario in DragPortTreeWidget. Outputs={target_ports}, Inputs={source_ports}")
+             event.ignore()
+
+
+        # 5. Finalize
+        if connection_made:
             event.acceptProposedAction()
         else:
+            # This case should ideally not be reached if source/target ports are valid
             event.ignore()
 
         self.window().clear_drop_target_highlight(self)
@@ -338,79 +494,204 @@ class DropPortTreeWidget(PortTreeWidget):  # Input Tree
         self.setAcceptDrops(True)
 
     def startDrag(self, supportedActions=None):
-        """Start drag operation with port name as data"""
-        item = self.currentItem() or self.initialSelection
-        if item and item.childCount() == 0:  # Only start drag for port items, not groups
+        """Start drag operation with port name or group data"""
+        selected_items = self.selectedItems()
+        if not selected_items:
+            return
+
+        # Filter out group items if multiple items are selected
+        port_items = [item for item in selected_items if item.childCount() == 0]
+        group_items = [item for item in selected_items if item.childCount() > 0]
+
+        mime_data = QMimeData()
+        drag_text = ""
+
+        if len(port_items) > 1:
+            # Dragging multiple ports
+            port_names = [item.data(0, Qt.ItemDataRole.UserRole) for item in port_items if item.data(0, Qt.ItemDataRole.UserRole)]
+            if not port_names: return # No valid ports selected
+
+            mime_data.setData("application/x-port-list", b"true") # Indicate multiple ports
+            mime_data.setData("application/x-port-role", b"input") # Role is input
+            mime_data.setText('\n'.join(port_names)) # Store port list
+            drag_text = f"{len(port_names)} Input Ports" # Text for pixmap
+
+        elif len(port_items) == 1 and not group_items:
+            # Dragging a single port (original logic)
+            item = port_items[0]
             port_name = item.data(0, Qt.ItemDataRole.UserRole)
-            mime_data = QMimeData()
+            if not port_name: return # Don't drag invalid items
+
+            mime_data.setData("application/x-port-role", b"input") # Role is input
             mime_data.setText(port_name)
-            mime_data.setData("application/x-port-role", b"input")
+            drag_text = item.text(0) # Use displayed text for pixmap
 
-            drag = QDrag(self)
-            drag.setMimeData(mime_data)
+        elif len(group_items) == 1 and not port_items:
+            # Dragging a single group (original logic)
+            item = group_items[0]
+            group_name = item.text(0)
+            port_list = self.window()._get_ports_in_group(item)
+            if not port_list: return # Don't drag empty groups
 
-            # Add visual feedback
-            pixmap = item.icon(0).pixmap(32, 32) if item.icon(0) else None
-            if not pixmap or pixmap.isNull():
-                pixmap = QPixmap(70, 20)
-                pixmap.fill(Qt.GlobalColor.transparent)
-                painter = QPainter(pixmap)
-                painter.setPen(self.palette().color(QPalette.ColorRole.Text))
-                painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, item.text(0))
-                painter.end()
+            mime_data.setData("application/x-port-group", b"true")
+            mime_data.setData("application/x-port-role", b"input") # Role is input for this tree
+            mime_data.setText('\n'.join(port_list)) # Store port list as newline-separated text
+            drag_text = group_name # Text for pixmap
 
-            drag.setPixmap(pixmap)
-            drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+        else:
+            # Invalid selection for dragging (e.g., mixed ports and groups, or nothing valid)
+            return
 
-            result = drag.exec(Qt.DropAction.CopyAction)
-            self.initialSelection = None
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+
+        # Add visual feedback (using drag_text)
+        # Create a generic pixmap for drag feedback
+        font_metrics = QFontMetrics(self.font())
+        text_width = font_metrics.horizontalAdvance(drag_text) + 10 # Add padding
+        pixmap_width = max(70, text_width) # Ensure minimum width
+        pixmap = QPixmap(pixmap_width, 20)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
+        # Use ElideRight if text is too long for the pixmap
+        elided_text = font_metrics.elidedText(drag_text, Qt.TextElideMode.ElideRight, pixmap_width)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, elided_text)
+        painter.end()
+
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+
+        result = drag.exec(Qt.DropAction.CopyAction)
+        self.initialSelection = None # Clear selection after drag finishes
 
     def dragEnterEvent(self, event):
         """Handle drag enter events to determine if drop should be accepted"""
-        if event.mimeData().hasText() and event.mimeData().hasFormat("application/x-port-role"):
-            role = event.mimeData().data("application/x-port-role")
-            if role == b"output":  # Only accept output ports for drops on input tree
+        mime_data = event.mimeData()
+        is_port_drop = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
+        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # Multiple ports
+        is_group_drop = mime_data.hasFormat("application/x-port-group")
+
+        # Accept if it's a single port, a list of ports, or a group, AND the role is output
+        if (is_port_drop or is_port_list_drop or is_group_drop):
+            # Role is always present for both port and group drags
+            role = mime_data.data("application/x-port-role")
+            if role == b"output":  # Only accept output ports/groups for drops on input tree
                 event.acceptProposedAction()
                 return
+
         event.ignore()
 
     def dragMoveEvent(self, event):
-        """Handle drag move events for visual feedback"""
-        if not event.mimeData().hasFormat("application/x-port-role"):
+        """Handle drag move events for visual feedback, supporting ports and groups."""
+        mime_data = event.mimeData()
+        is_port_drag = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
+        is_port_list_drag = mime_data.hasFormat("application/x-port-list") # Multiple ports
+        is_group_drag = mime_data.hasFormat("application/x-port-group")
+
+        # 1. Check if it's a valid drag type we handle (Output role)
+        if not (is_port_drag or is_port_list_drag or is_group_drag) or mime_data.data("application/x-port-role") != b"output":
             event.ignore()
+            # Clear highlight if needed
+            if self.current_drag_highlight_item:
+                self.window().clear_drop_target_highlight(self)
+                self.current_drag_highlight_item = None
             return
 
-        item = self.itemAt(event.position().toPoint())
-        if item and item != self.current_drag_highlight_item and item.childCount() == 0:
-            self.window().clear_drop_target_highlight(self)
-            self.window().highlight_drop_target_item(self, item)
-            self.current_drag_highlight_item = item
-            event.acceptProposedAction()
-        elif not item or item.childCount() > 0:
-            self.window().clear_drop_target_highlight(self)
-            self.current_drag_highlight_item = None
-            event.ignore()
+        # 2. Get item under cursor (Target item in Input tree)
+        target_item = self.itemAt(event.position().toPoint())
+
+        # 3. Determine if the target item is a valid drop target for the current drag source
+        # Now, any target (port or group) is valid if the source is an Output port/group/list
+        is_valid_target = bool(target_item)
+
+        # 4. Handle highlighting and accepting/ignoring
+        if is_valid_target:
+            if target_item != self.current_drag_highlight_item:
+                self.window().clear_drop_target_highlight(self)
+                self.window().highlight_drop_target_item(self, target_item) # Highlight the valid target
+                self.current_drag_highlight_item = target_item
+            event.acceptProposedAction() # Accept move over valid target
         else:
-            event.acceptProposedAction()
+            # Invalid target or no item under cursor
+            if self.current_drag_highlight_item: # Clear highlight if there was one
+                self.window().clear_drop_target_highlight(self)
+                self.current_drag_highlight_item = None
+            event.ignore() # Ignore move over invalid target
 
     def dropEvent(self, event):
-        """Handle drop events to create connections"""
-        if not event.mimeData().hasFormat("application/x-port-role"):
+        """Handle drop events to create connections for ports or groups."""
+        mime_data = event.mimeData()
+        is_port_drop = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
+        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # Multiple ports
+        is_group_drop = mime_data.hasFormat("application/x-port-group")
+
+        # 1. Check validity (Source must be Output)
+        if not (is_port_drop or is_port_list_drop or is_group_drop) or mime_data.data("application/x-port-role") != b"output":
             event.ignore()
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
             return
 
-        role = event.mimeData().data("application/x-port-role")
-        if role != b"output":
+        # 2. Get target item (Input tree)
+        target_item = self.itemAt(event.position().toPoint())
+        if not target_item:
             event.ignore()
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
             return
 
-        output_name = event.mimeData().text()
-        item = self.itemAt(event.position().toPoint())
-        if item and item.childCount() == 0:
-            input_name = item.data(0, Qt.ItemDataRole.UserRole)
-            self.window().make_connection(output_name, input_name)
+        is_target_group = target_item.childCount() > 0
+        target_ports = []
+        if is_target_group:
+            target_ports = self.window()._get_ports_in_group(target_item)
+        else:
+            target_port_name = target_item.data(0, Qt.ItemDataRole.UserRole)
+            if target_port_name:
+                target_ports = [target_port_name] # Treat single port as list
+
+        if not target_ports: # No valid target port(s) found
+            event.ignore()
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
+            return
+
+        # 3. Get source ports (Output)
+        source_ports = mime_data.text().split('\n')
+        # Filter out empty strings that might result from splitting
+        source_ports = [port for port in source_ports if port]
+        if not source_ports: # No valid source ports
+             event.ignore()
+             self.window().clear_drop_target_highlight(self)
+             self.current_drag_highlight_item = None
+             return
+
+        # 4. Perform connection based on source and target types
+        connection_made = False
+        # Check for single port -> single port case
+        if not is_group_drop and not is_port_list_drop and not is_target_group and len(source_ports) == 1 and len(target_ports) == 1:
+             # Single Output Port -> Single Input Port
+             output_name = source_ports[0]
+             input_name = target_ports[0]
+             print(f"Connecting single: {output_name} -> {input_name}")
+             self.window().make_connection(output_name, input_name)
+             connection_made = True
+        # Check for cases involving groups or multiple ports
+        elif (is_group_drop or is_port_list_drop or is_target_group):
+             # Use make_multiple_connections for Group->Port, Port->Group, Group->Group, List->Port, List->Group
+             print(f"Connecting multiple/group: Outputs={source_ports}, Inputs={target_ports}")
+             self.window().make_multiple_connections(source_ports, target_ports)
+             connection_made = True
+        else:
+             # This case might occur if logic above is flawed, or unexpected drop type
+             print(f"Warning: Unhandled drop scenario in DropPortTreeWidget. Outputs={source_ports}, Inputs={target_ports}")
+             event.ignore()
+
+        # 5. Finalize
+        if connection_made:
             event.acceptProposedAction()
         else:
+            # This case should ideally not be reached if source/target ports are valid
             event.ignore()
 
         self.window().clear_drop_target_highlight(self)
@@ -612,10 +893,7 @@ class JackConnectionManager(QMainWindow):
         """)
 
         layout.addWidget(self.pwtop_text)
-
-        # Start pw-top process when tab is created
-        self.start_pwtop_process()
-
+        # pw-top process will be started when the tab is selected
     def start_pwtop_process(self):
         """Start the pw-top process in batch mode"""
         if self.pw_process is None:
@@ -727,12 +1005,21 @@ class JackConnectionManager(QMainWindow):
 
         self.latency_run_button.setEnabled(False)
         self.latency_stop_button.setEnabled(True) # Enable Stop button
-        self.latency_results_text.setText("Starting latency test...\n"
-                                          "Select ports if not already selected.\n"
-                                          "Attempting auto-connection...\n"
-                                          "Waiting for measurement signal...\n") # Updated message
+        self.latency_results_text.clear() # Clear previous results/messages
+
+        if self.latency_raw_output_checkbox.isChecked():
+             self.latency_results_text.setText("Starting latency test (Raw Output)...\n"
+                                               "Select ports if not already selected.\n"
+                                               "Attempting auto-connection...\n")
+        else:
+             self.latency_results_text.setText("Starting latency test (Average)...\n"
+                                               "Select ports if not already selected.\n"
+                                               "Attempting auto-connection...\n"
+                                               "Waiting for measurement signal...\n") # Updated message
+
         self.latency_values = []
-        self.latency_waiting_for_connection = True # Set flag to wait
+        # Only wait for connection signal if NOT showing raw output
+        self.latency_waiting_for_connection = not self.latency_raw_output_checkbox.isChecked()
 
         self.latency_process = QProcess()
         self.latency_process.readyReadStandardOutput.connect(self.handle_latency_output)
@@ -771,32 +1058,38 @@ class JackConnectionManager(QMainWindow):
             return
 
         data = self.latency_process.readAllStandardOutput().data().decode()
-        # self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End) # Removed
-        # self.latency_results_text.insertPlainText(data) # Removed - Don't show raw output
-        # self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End) # Removed
 
-        # Check if we are waiting for the connection signal
-        if self.latency_waiting_for_connection:
-            # Check if any line contains a latency measurement
-            if re.search(r'\d+\.\d+\s+ms', data):
-                self.latency_waiting_for_connection = False
-                self.latency_results_text.setText("Connection detected. Running test...") # Changed message
-                # Start the timer now
-                self.latency_timer.setSingleShot(True)
-                self.latency_timer.timeout.connect(self.stop_latency_test)
-                self.latency_timer.start(10000) # 10 seconds
+        if self.latency_raw_output_checkbox.isChecked():
+            # Raw output mode: Append data directly
+            self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End)
+            self.latency_results_text.insertPlainText(data)
+            self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End)
+        else:
+            # Average calculation mode (original logic)
+            # Check if we are waiting for the connection signal
+            if self.latency_waiting_for_connection:
+                # Check if any line contains a latency measurement
+                if re.search(r'\d+\.\d+\s+ms', data):
+                    self.latency_waiting_for_connection = False
+                    self.latency_results_text.setText("Connection detected. Running test...") # Changed message
+                    # Start the timer now
+                    self.latency_timer.setSingleShot(True)
+                    self.latency_timer.timeout.connect(self.stop_latency_test)
+                    self.latency_timer.start(10000) # 10 seconds
 
-        # If not waiting (or connection just detected), parse for values
-        if not self.latency_waiting_for_connection:
-            for line in data.splitlines():
-                match = re.search(r'(\d+\.\d+)\s+ms', line)
-                if match:
-                    try:
-                        latency_ms = float(match.group(1))
-                        self.latency_values.append(latency_ms)
-                    except ValueError:
-                        pass # Ignore lines that don't parse correctly
-
+            # If not waiting (or connection just detected), parse for values
+            if not self.latency_waiting_for_connection:
+                for line in data.splitlines():
+                    # Updated regex to capture both frames and ms
+                    match = re.search(r'(\d+\.\d+)\s+frames\s+(\d+\.\d+)\s+ms', line)
+                    if match:
+                        try:
+                            latency_frames = float(match.group(1))
+                            latency_ms = float(match.group(2))
+                            # Store both values as a tuple
+                            self.latency_values.append((latency_frames, latency_ms))
+                        except ValueError:
+                            pass # Ignore lines that don't parse correctly
     def stop_latency_test(self):
         """Stops the jack_delay process."""
         if self.latency_timer.isActive():
@@ -817,10 +1110,18 @@ class JackConnectionManager(QMainWindow):
         # Clear previous text before showing final result
         self.latency_results_text.clear()
 
-        if self.latency_values:
-            average_latency = sum(self.latency_values) / len(self.latency_values)
-            # Display only the average latency
-            self.latency_results_text.setText(f"Latency (average): {average_latency:.3f} ms")
+        if self.latency_raw_output_checkbox.isChecked():
+            # If raw output was shown, just indicate stop
+            self.latency_results_text.setText("Measurement stopped.")
+        elif self.latency_values:
+            # Calculate average for frames and ms separately (only if not raw output)
+            total_frames = sum(val[0] for val in self.latency_values)
+            total_ms = sum(val[1] for val in self.latency_values)
+            count = len(self.latency_values)
+            average_frames = total_frames / count
+            average_ms = total_ms / count
+            # Display both average latencies
+            self.latency_results_text.setText(f"Round-trip latency (average): {average_frames:.3f} frames / {average_ms:.3f} ms")
         else:
             # Check if the process exited normally but produced no values
             if exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0:
@@ -884,7 +1185,7 @@ class JackConnectionManager(QMainWindow):
             "(you can click 'Start Measurement' first and then try different ports)<br>"
             "5. <b><font color='orange'>Warning:</font></b> Start with low volume/gain levels on your interface "
             "to avoid potential damage from the test signal.<br><br>"
-            "After the signal is detected, the average measured latency will be shown after 10 seconds.<br><br><br><br><br>"
+            "After the signal is detected, the average measured round-trip latency will be shown after 10 seconds.<br><br><br><br><br>"
         )
 
         instructions_label = QLabel(instructions_text)
@@ -945,6 +1246,11 @@ class JackConnectionManager(QMainWindow):
         button_layout.addWidget(self.latency_run_button)
         button_layout.addWidget(self.latency_stop_button)
         layout.addLayout(button_layout) # Add the horizontal layout for buttons
+
+        # Raw Output Toggle Checkbox
+        self.latency_raw_output_checkbox = QCheckBox("Show Raw Output (Continuous)")
+        self.latency_raw_output_checkbox.setStyleSheet(f"color: {self.text_color.name()};") # Style checkbox text
+        layout.addWidget(self.latency_raw_output_checkbox) # Add checkbox below buttons
 
         # Results Text Edit
         self.latency_results_text = QTextEdit()
@@ -1306,7 +1612,8 @@ class JackConnectionManager(QMainWindow):
             self.refresh_visualizations()
             self.show_bottom_controls(True) # Show controls
         elif index == 2:  # pw-top tab
-            if self.pw_process is None: # Start if not already running
+            # Start pw-top process only when switching to this tab
+            if self.pw_process is None or self.pw_process.state() == QProcess.ProcessState.NotRunning:
                 self.start_pwtop_process()
             self.show_bottom_controls(False) # Hide controls
         elif index == 3: # jack_delay tab
@@ -1374,10 +1681,7 @@ class JackConnectionManager(QMainWindow):
         """Handle port registration events in the Qt main thread"""
         if not self.callbacks_enabled:
             return
-        # Removed filtering based on current port_type and name.
-        # A port registration is a global event and should trigger refresh
-        # regardless of the currently viewed tab. refresh_ports() handles
-        # displaying the correct ports for the current tab.
+        
 
         # Check if this is a jack_delay port registration, and if so, attempt auto-connection
         if port_name == "jack_delay:in" or port_name == "jack_delay:out":
@@ -1393,10 +1697,7 @@ class JackConnectionManager(QMainWindow):
         """Handle port unregistration events in the Qt main thread"""
         if not self.callbacks_enabled:
             return
-        # Removed filtering based on current port_type and name.
-        # A port unregistration is a global event and should trigger refresh
-        # regardless of the currently viewed tab. refresh_ports() handles
-        # displaying the correct ports for the current tab.
+        
         self.refresh_ports()
 
     def toggle_auto_refresh(self, state):
@@ -1449,164 +1750,134 @@ class JackConnectionManager(QMainWindow):
             QPushButton:hover {{ background-color: {self.highlight_color.name()}; }}
         """
 
+    def _get_selected_item_info(self, tree_widget):
+        """Gets information about the currently selected item (port or group)."""
+        if not hasattr(tree_widget, 'currentItem'):
+            return None, None # Not a valid tree
+        item = tree_widget.currentItem()
+        if not item:
+            return None, None # Nothing selected
+
+        is_group = item.childCount() > 0
+        if is_group:
+            return item.text(0), True # Return group name and True
+        else:
+            port_name = item.data(0, Qt.ItemDataRole.UserRole)
+            return port_name, False # Return port name and False
+
+    def _restore_selection(self, tree_widget, selection_info):
+        """Restores selection based on saved info (group name or port name)."""
+        if not selection_info or not hasattr(tree_widget, 'port_items'):
+            return
+
+        name_or_text, is_group = selection_info
+        if name_or_text is None:
+            return
+
+        item_to_select = None
+        if is_group:
+            # Find group item by text
+            for i in range(tree_widget.topLevelItemCount()):
+                group_item = tree_widget.topLevelItem(i)
+                if group_item.text(0) == name_or_text:
+                    item_to_select = group_item
+                    break
+        else:
+            # Find port item by port name (UserRole data)
+            item_to_select = tree_widget.port_items.get(name_or_text)
+
+        if item_to_select and not item_to_select.isHidden():
+            tree_widget.setCurrentItem(item_to_select)
+
     def refresh_ports(self):
+        # 1. Determine current context (trees, filters, type)
         if self.port_type == 'audio':
-            current_input_port = self.input_tree.getSelectedPortName() if hasattr(self, 'input_tree') else None
-            current_output_port = self.output_tree.getSelectedPortName() if hasattr(self, 'output_tree') else None
-            current_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
-            current_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
-
-            self.input_tree.clear()
-            self.output_tree.clear()
-
-            input_ports, output_ports = self._get_ports(is_midi=False)
-
-            for input_port in input_ports:
-                self.input_tree.addPort(input_port)
-
-            for output_port in output_ports:
-                self.output_tree.addPort(output_port)
-
-            # Re-apply filter after repopulating
-            self.filter_ports(self.input_tree, current_input_filter)
-            self.filter_ports(self.output_tree, current_output_filter)
-
-            # Restore selection if ports still exist and are visible
-            if current_input_port and current_input_port in self.input_tree.port_items:
-                item = self.input_tree.port_items[current_input_port]
-                if not item.isHidden():
-                    self.input_tree.setCurrentItem(item)
-
-            if current_output_port and current_output_port in self.output_tree.port_items:
-                item = self.output_tree.port_items[current_output_port]
-                if not item.isHidden():
-                    self.output_tree.setCurrentItem(item)
-
-            self.update_connections()
-            self.clear_highlights()
-            self.update_connection_buttons()
-            self._highlight_connected_ports(current_input_port, current_output_port, is_midi=False)
-
+            input_tree = self.input_tree
+            output_tree = self.output_tree
+            update_visuals = self.update_connections
+            clear_highlights = self.clear_highlights
+            update_buttons = self.update_connection_buttons
+            is_midi = False
         elif self.port_type == 'midi':
-            current_input_port = self.midi_input_tree.getSelectedPortName() if hasattr(self, 'midi_input_tree') else None
-            current_output_port = self.midi_output_tree.getSelectedPortName() if hasattr(self, 'midi_output_tree') else None
-            current_input_filter = self.midi_input_filter_edit.text() if hasattr(self, 'midi_input_filter_edit') else ""
-            current_output_filter = self.midi_output_filter_edit.text() if hasattr(self, 'midi_output_filter_edit') else ""
+            input_tree = self.midi_input_tree
+            output_tree = self.midi_output_tree
+            update_visuals = self.update_midi_connections
+            clear_highlights = self.clear_midi_highlights
+            update_buttons = self.update_midi_connection_buttons
+            is_midi = True
+        else:
+            return # Should not happen
 
-            self.midi_input_tree.clear()
-            self.midi_output_tree.clear()
+        # Use shared filter edits
+        current_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
+        current_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
 
-            input_ports, output_ports = self._get_ports(is_midi=True)
+        # 2. Save current selection (port or group)
+        selected_input_info = self._get_selected_item_info(input_tree)
+        selected_output_info = self._get_selected_item_info(output_tree)
 
-            for input_port in input_ports:
-                self.midi_input_tree.addPort(input_port)
+        # 3. Clear and repopulate trees
+        input_tree.clear()
+        output_tree.clear()
+        input_ports, output_ports = self._get_ports(is_midi=is_midi)
+        for port in input_ports:
+            input_tree.addPort(port)
+        for port in output_ports:
+            output_tree.addPort(port)
 
-            for output_port in output_ports:
-                self.midi_output_tree.addPort(output_port)
+        # 4. Re-apply filter
+        self.filter_ports(input_tree, current_input_filter)
+        self.filter_ports(output_tree, current_output_filter)
 
-            # Re-apply filter after repopulating
-            self.filter_ports(self.midi_input_tree, current_input_filter)
-            self.filter_ports(self.midi_output_tree, current_output_filter)
+        # 5. Restore selection
+        self._restore_selection(input_tree, selected_input_info)
+        self._restore_selection(output_tree, selected_output_info)
 
-            # Restore selection if ports still exist and are visible
-            if current_input_port and current_input_port in self.midi_input_tree.port_items:
-                item = self.midi_input_tree.port_items[current_input_port]
-                if not item.isHidden():
-                    self.midi_input_tree.setCurrentItem(item)
+        # 6. Update visuals and button states
+        update_visuals()
+        clear_highlights() # Clear old highlights before applying new ones
+        update_buttons()
 
-            if current_output_port and current_output_port in self.midi_output_tree.port_items:
-                item = self.midi_output_tree.port_items[current_output_port]
-                if not item.isHidden():
-                    self.midi_output_tree.setCurrentItem(item)
+        # 7. Re-apply highlights based on the *restored* selection
+        restored_input_item = input_tree.currentItem()
+        restored_output_item = output_tree.currentItem()
 
-            self.update_midi_connections()
-            self.clear_midi_highlights()
-            self.update_midi_connection_buttons()
-            self._highlight_connected_ports(current_input_port, current_output_port, is_midi=True)
+        # Highlight selected item itself (port or group)
+        if restored_input_item:
+            if restored_input_item.childCount() == 0: # Port
+                 port_name = restored_input_item.data(0, Qt.ItemDataRole.UserRole)
+                 self._highlight_tree_item(input_tree, port_name) # Highlight selected port
+            # No specific highlight for the selected group itself, only connected ones
 
-        # --- Update Both Audio and MIDI Trees ---
-        # Always refresh the data for both tabs, regardless of which is active.
-
-        # Remember current selections and filters for both tabs
-        current_audio_input_port = self.input_tree.getSelectedPortName() if hasattr(self, 'input_tree') else None
-        current_audio_output_port = self.output_tree.getSelectedPortName() if hasattr(self, 'output_tree') else None
-        current_audio_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
-        current_audio_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
-
-        current_midi_input_port = self.midi_input_tree.getSelectedPortName() if hasattr(self, 'midi_input_tree') else None
-        current_midi_output_port = self.midi_output_tree.getSelectedPortName() if hasattr(self, 'midi_output_tree') else None
-        # MIDI uses the same filter edits as Audio
-        current_midi_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
-        current_midi_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
-
-
-        # --- Refresh Audio Ports ---
-        if hasattr(self, 'input_tree') and hasattr(self, 'output_tree'):
-            self.input_tree.clear()
-            self.output_tree.clear()
-            audio_input_ports, audio_output_ports = self._get_ports(is_midi=False)
-
-            for port in audio_input_ports:
-                self.input_tree.addPort(port)
-            for port in audio_output_ports:
-                self.output_tree.addPort(port)
-
-            # Re-apply filter
-            self.filter_ports(self.input_tree, current_audio_input_filter)
-            self.filter_ports(self.output_tree, current_audio_output_filter)
-
-            # Restore selection if port still exists and is visible
-            if current_audio_input_port and current_audio_input_port in self.input_tree.port_items:
-                item = self.input_tree.port_items[current_audio_input_port]
-                if not item.isHidden(): self.input_tree.setCurrentItem(item)
-            if current_audio_output_port and current_audio_output_port in self.output_tree.port_items:
-                item = self.output_tree.port_items[current_audio_output_port]
-                if not item.isHidden(): self.output_tree.setCurrentItem(item)
-
-        # --- Refresh MIDI Ports ---
-        if hasattr(self, 'midi_input_tree') and hasattr(self, 'midi_output_tree'):
-            self.midi_input_tree.clear()
-            self.midi_output_tree.clear()
-            midi_input_ports, midi_output_ports = self._get_ports(is_midi=True)
-
-            for port in midi_input_ports:
-                self.midi_input_tree.addPort(port)
-            for port in midi_output_ports:
-                self.midi_output_tree.addPort(port)
-
-            # Re-apply filter
-            self.filter_ports(self.midi_input_tree, current_midi_input_filter)
-            self.filter_ports(self.midi_output_tree, current_midi_output_filter)
-
-            # Restore selection if port still exists and is visible
-            if current_midi_input_port and current_midi_input_port in self.midi_input_tree.port_items:
-                item = self.midi_input_tree.port_items[current_midi_input_port]
-                if not item.isHidden(): self.midi_input_tree.setCurrentItem(item)
-            if current_midi_output_port and current_midi_output_port in self.midi_output_tree.port_items:
-                item = self.midi_output_tree.port_items[current_midi_output_port]
-                if not item.isHidden(): self.midi_output_tree.setCurrentItem(item)
+        if restored_output_item:
+             if restored_output_item.childCount() == 0: # Port
+                 port_name = restored_output_item.data(0, Qt.ItemDataRole.UserRole)
+                 self._highlight_tree_item(output_tree, port_name) # Highlight selected port
+             # No specific highlight for the selected group itself, only connected ones
 
 
-        # --- Update Visuals for the ACTIVE Tab Only ---
-        if self.port_type == 'audio':
-            self.update_connections() # Update audio visualization
-            self.clear_highlights()   # Clear audio highlights
-            self.update_connection_buttons() # Update audio connect/disconnect buttons
-            # Highlight connected ports based on current audio selection
-            self._highlight_connected_ports(current_audio_input_port, current_audio_output_port, is_midi=False)
-        elif self.port_type == 'midi':
-            self.update_midi_connections() # Update midi visualization
-            self.clear_midi_highlights()   # Clear midi highlights
-            self.update_midi_connection_buttons() # Update midi connect/disconnect buttons
-            # Highlight connected ports based on current midi selection
-            self._highlight_connected_ports(current_midi_input_port, current_midi_output_port, is_midi=True)
+        # Highlight connected items/groups
+        if restored_input_item:
+            if restored_input_item.childCount() > 0: # Group selected
+                self._highlight_connected_output_groups_for_input_group(restored_input_item, is_midi)
+            else: # Port selected
+                port_name = restored_input_item.data(0, Qt.ItemDataRole.UserRole)
+                if port_name: # Ensure port_name is valid
+                    self._highlight_connected_outputs_for_input(port_name, is_midi)
 
 
-        # Maintain collapse state after refresh if collapse all is enabled
-        # This needs to apply to the *current* trees based on the active tab
+        if restored_output_item:
+            if restored_output_item.childCount() > 0: # Group selected
+                self._highlight_connected_input_groups_for_output_group(restored_output_item, is_midi)
+            else: # Port selected
+                port_name = restored_output_item.data(0, Qt.ItemDataRole.UserRole)
+                if port_name: # Ensure port_name is valid
+                    self._highlight_connected_inputs_for_output(port_name, is_midi)
+
+
+        # 8. Maintain collapse state if needed
         if hasattr(self, 'collapse_all_checkbox') and self.collapse_all_checkbox.isChecked():
             self.apply_collapse_state_to_current_trees()
-
 
     # Add a new helper method to apply collapse state only to the current tab's trees
     def apply_collapse_state_to_current_trees(self):
@@ -1759,29 +2030,289 @@ class JackConnectionManager(QMainWindow):
             print(f"{operation_type.capitalize()} error: {e}")
             # Don't crash on connection errors, just log them
 
+    # Add this new method to the JackConnectionManager class
+    def make_multiple_connections(self, outputs, inputs):
+        """Connects multiple output ports to multiple input ports,
+           handling group/list-to-port and port-to-group/list scenarios.
+           Determines if it's audio or MIDI based on the current tab."""
+        if not outputs or not inputs:
+            print("Warning: make_multiple_connections called with empty outputs or inputs.")
+            return
+
+        # Ensure inputs are lists for consistent handling
+        output_list = outputs if isinstance(outputs, list) else [outputs]
+        input_list = inputs if isinstance(inputs, list) else [inputs]
+
+        if not output_list or not input_list:
+             print(f"Warning: make_multiple_connections called with empty lists after ensuring list type: outputs={output_list}, inputs={input_list}")
+             return
+
+        # Determine if MIDI or Audio based on the current tab
+        is_midi = self.tab_widget.currentIndex() == 1 # Assuming MIDI is tab index 1
+        # Use _port_operation directly as it handles history and updates
+        operation_type = 'connect'
+
+        num_outputs = len(output_list)
+        num_inputs = len(input_list)
+        made_connection_attempt = False
+
+        print(f"make_multiple_connections: {num_outputs} outputs, {num_inputs} inputs. MIDI: {is_midi}")
+
+        if num_outputs > 1 and num_inputs == 1:
+            # Group/List to Port: Connect all outputs to the single input
+            single_input = input_list[0]
+            print(f"  Scenario: Group/List ({num_outputs}) -> Port ({single_input})")
+            for output_name in output_list:
+                try:
+                    self._port_operation(operation_type, output_name, single_input, is_midi)
+                    made_connection_attempt = True
+                except jack.JackError as e:
+                    print(f"  Failed to connect {output_name} -> {single_input}: {e}")
+
+        elif num_outputs == 1 and num_inputs > 1:
+            # Port to Group/List: Connect the single output to all inputs
+            single_output = output_list[0]
+            print(f"  Scenario: Port ({single_output}) -> Group/List ({num_inputs})")
+            for input_name in input_list:
+                try:
+                    self._port_operation(operation_type, single_output, input_name, is_midi)
+                    made_connection_attempt = True
+                except jack.JackError as e:
+                    print(f"  Failed to connect {single_output} -> {input_name}: {e}")
+
+        elif num_outputs > 1 and num_inputs > 1:
+            # Group/List to Group/List: Use suffix matching then sequential matching (Restored Logic)
+            print(f"  Scenario: Group/List ({num_outputs}) -> Group/List ({num_inputs}) - Applying suffix/sequential matching")
+
+            # Define common suffixes for matching (copied from original logic)
+            common_suffixes = [
+               '_FL', '_FR', '_SL', '_SR', '_FC', '_LFE', '_RL', '_RR',
+               '_L', '_R', '_1', '_2', '_3', '_4', '_5', '_6', '_7', '_8',
+               'left', 'right', 'Left', 'Right'
+            ]
+
+            # Create copies to modify while iterating
+            unmatched_outputs = list(output_list)
+            unmatched_inputs = list(input_list)
+            connections_made_in_group = [] # Track connections made in this block
+
+            # First pass: match by exact suffixes
+            for suffix in common_suffixes:
+                outputs_with_suffix = [p for p in unmatched_outputs if p.endswith(suffix)]
+                inputs_with_suffix = [p for p in unmatched_inputs if p.endswith(suffix)]
+
+                # Pair up matching ports based on suffix
+                pairs_to_connect = min(len(outputs_with_suffix), len(inputs_with_suffix))
+                for i in range(pairs_to_connect):
+                    out_p = outputs_with_suffix[i]
+                    in_p = inputs_with_suffix[i]
+                    try:
+                        print(f"    Suffix Match ({suffix}): {out_p} -> {in_p}")
+                        # Use _port_operation directly to handle history correctly for each pair
+                        self._port_operation(operation_type, out_p, in_p, is_midi)
+                        connections_made_in_group.append((out_p, in_p))
+                        unmatched_outputs.remove(out_p)
+                        unmatched_inputs.remove(in_p)
+                        made_connection_attempt = True # Set the outer flag
+                    except Exception as e:
+                        print(f"      Connection failed: {e}")
+
+            # Second pass: try to match remaining ports sequentially
+            while unmatched_outputs and unmatched_inputs:
+                out_p = unmatched_outputs[0]
+                in_p = unmatched_inputs[0]
+                try:
+                    print(f"    Sequential Match: {out_p} -> {in_p}")
+                    # Use _port_operation directly
+                    self._port_operation(operation_type, out_p, in_p, is_midi)
+                    connections_made_in_group.append((out_p, in_p))
+                    made_connection_attempt = True # Set the outer flag
+                except Exception as e:
+                    print(f"      Connection failed: {e}")
+                # Remove the matched ports regardless of success to avoid infinite loops on error
+                unmatched_outputs.pop(0)
+                unmatched_inputs.pop(0)
+
+            print(f"  Group-to-group connection finished. Attempted {len(connections_made_in_group)} connections.")
+
+        elif num_outputs == 1 and num_inputs == 1:
+             # Single Port to Single Port
+             single_output = output_list[0]
+             single_input = input_list[0]
+             print(f"  Scenario: Port ({single_output}) -> Port ({single_input})")
+             try:
+                 self._port_operation(operation_type, single_output, single_input, is_midi)
+                 made_connection_attempt = True
+             except jack.JackError as e:
+                 print(f"  Failed to connect {single_output} -> {single_input}: {e}")
+        else:
+            # Should not happen if lists are not empty at the start
+            print(f"Warning: Unexpected case in make_multiple_connections: {num_outputs} outputs, {num_inputs} inputs")
+
+
+        if made_connection_attempt:
+            print("Multiple connection process finished.")
+            # self.refresh_visualizations() # _port_operation calls refresh_ports which calls update_connections
+            # self.update_undo_redo_buttons() # _port_operation calls this
+            pass # Updates are handled within _port_operation calls
+    def make_group_connection(self, output_ports, input_ports):
+       """
+       Connects a group of output ports to a group of input ports,
+       attempting to match common channel suffixes first.
+       """
+       print(f"Attempting group connection: {output_ports} -> {input_ports}")
+
+       # Determine if it's MIDI based on port names (simple heuristic)
+       is_midi = any('midi' in p.lower() for p in output_ports + input_ports)
+       connection_func = self.make_midi_connection if is_midi else self.make_connection
+
+       # --- Suffix-based matching ---
+       common_suffixes = [
+           '_FL', '_FR',  # Front Left/Right
+           '_SL', '_SR',  # Surround Left/Right
+           '_FC', '_LFE', # Center/Subwoofer
+           '_RL', '_RR',  # Rear Left/Right
+           '_L', '_R',    # Generic Left/Right
+           '_1', '_2', '_3', '_4', '_5', '_6', '_7', '_8',  # Numbered channels
+           'left', 'right',  # Alternative naming
+           'Left', 'Right',
+        #   '_FL-*', '_FR-*'
+       ]
+
+       # Create copies to modify while iterating
+       unmatched_outputs = list(output_ports)
+       unmatched_inputs = list(input_ports)
+       connections_made = []
+
+       # First pass: match by exact suffixes
+       for suffix in common_suffixes:
+           outputs_with_suffix = [p for p in unmatched_outputs if p.endswith(suffix)]
+           inputs_with_suffix = [p for p in unmatched_inputs if p.endswith(suffix)]
+
+           for out_p, in_p in zip(outputs_with_suffix, inputs_with_suffix):
+               try:
+                   print(f"  Suffix Match ({suffix}): {out_p} -> {in_p}")
+                   connection_func(out_p, in_p)
+                   connections_made.append((out_p, in_p))
+                   unmatched_outputs.remove(out_p)
+                   unmatched_inputs.remove(in_p)
+               except Exception as e:
+                   print(f"    Connection failed: {e}")
+
+       # Second pass: try to match remaining ports in order
+       # This handles cases where suffixes don't match exactly
+       while unmatched_outputs and unmatched_inputs:
+           out_p = unmatched_outputs[0]
+           in_p = unmatched_inputs[0]
+           try:
+               print(f"  Sequential Match: {out_p} -> {in_p}")
+               connection_func(out_p, in_p)
+               connections_made.append((out_p, in_p))
+           except Exception as e:
+               print(f"    Connection failed: {e}")
+           unmatched_outputs.pop(0)
+           unmatched_inputs.pop(0)
+
+       print(f"Group connection finished. Made {len(connections_made)} connections.")
+       return len(connections_made) > 0
+
+    def _get_ports_in_group(self, item):
+        """Get all ports in a group or just the single port if it's a port item"""
+        if not item:
+            return []
+        if item.childCount() == 0:  # It's a port item
+            port_name = item.data(0, Qt.ItemDataRole.UserRole)
+            return [port_name] if port_name else []
+        else:  # It's a group item
+            ports = []
+            for i in range(item.childCount()):
+                child = item.child(i)
+                port_name = child.data(0, Qt.ItemDataRole.UserRole)
+                if port_name:
+                    ports.append(port_name)
+            return ports
+
     def make_connection_selected(self):
-        input_port = self.input_tree.getSelectedPortName()
-        output_port = self.output_tree.getSelectedPortName()
-        if input_port and output_port:
-            self.make_connection(output_port, input_port)
+        """Connects selected items. Uses pairwise logic for pure group selections,
+           cross-product otherwise."""
+        selected_input_items = self.input_tree.selectedItems()
+        selected_output_items = self.output_tree.selectedItems()
+
+        # Always use cross-product logic for button clicks.
+        # Get all ports from selected items (handles both ports and groups).
+        selected_inputs = self._get_ports_from_selected_items(self.input_tree)
+        selected_outputs = self._get_ports_from_selected_items(self.output_tree)
+
+        if not selected_inputs or not selected_outputs:
+            print("Make Connection: Select at least one input and one output item (port or group).")
+            return
+
+        print(f"Making connections (button): Outputs={selected_outputs}, Inputs={selected_inputs}")
+        # Use make_multiple_connections which handles the cross-product internally
+        self.make_multiple_connections(selected_outputs, selected_inputs)
 
     def make_midi_connection_selected(self):
-        input_port = self.midi_input_tree.getSelectedPortName()
-        output_port = self.midi_output_tree.getSelectedPortName()
-        if input_port and output_port:
-            self.make_midi_connection(output_port, input_port)
+        """Connects selected MIDI items. Uses pairwise logic for pure group selections,
+           cross-product otherwise."""
+        selected_input_items = self.midi_input_tree.selectedItems()
+        selected_output_items = self.midi_output_tree.selectedItems()
+
+        # Always use cross-product logic for button clicks.
+        # Get all ports from selected items (handles both ports and groups).
+        selected_inputs = self._get_ports_from_selected_items(self.midi_input_tree)
+        selected_outputs = self._get_ports_from_selected_items(self.midi_output_tree)
+
+        if not selected_inputs or not selected_outputs:
+            print("Make MIDI Connection: Select at least one input and one output item (port or group).")
+            return
+
+        print(f"Making MIDI connections (button): Outputs={selected_outputs}, Inputs={selected_inputs}")
+        # Use make_multiple_connections which handles the cross-product internally
+        self.make_multiple_connections(selected_outputs, selected_inputs)
+
+    def break_group_connection(self, output_ports, input_ports):
+        """Break all connections between two groups of ports"""
+        is_midi = any('midi' in p.lower() for p in output_ports + input_ports)
+        disconnect_func = self.break_midi_connection if is_midi else self.break_connection
+        
+        for output_port in output_ports:
+            try:
+                connections = self.client.get_all_connections(output_port)
+                for connection in connections:
+                    if connection.name in input_ports:
+                        disconnect_func(output_port, connection.name)
+            except jack.JackError as e:
+                print(f"Error breaking connection from {output_port}: {e}")
 
     def break_connection_selected(self):
-        input_port = self.input_tree.getSelectedPortName()
-        output_port = self.output_tree.getSelectedPortName()
-        if input_port and output_port:
-            self.break_connection(output_port, input_port)
+        """Disconnects all selected output ports from all selected input ports."""
+        selected_inputs = self._get_ports_from_selected_items(self.input_tree)
+        selected_outputs = self._get_ports_from_selected_items(self.output_tree)
+
+        if not selected_inputs or not selected_outputs:
+            print("Break Connection: Select at least one input and one output port.")
+            return
+
+        print(f"Breaking connections for: Outputs={selected_outputs}, Inputs={selected_inputs}")
+        for out_port in selected_outputs:
+            for in_port in selected_inputs:
+                # We only need to attempt disconnection, Jack handles non-existent ones gracefully
+                self.break_connection(out_port, in_port) # Use existing single disconnection method
 
     def break_midi_connection_selected(self):
-        input_port = self.midi_input_tree.getSelectedPortName()
-        output_port = self.midi_output_tree.getSelectedPortName()
-        if input_port and output_port:
-            self.break_midi_connection(output_port, input_port)
+        """Disconnects all selected MIDI output ports from all selected MIDI input ports."""
+        selected_inputs = self._get_ports_from_selected_items(self.midi_input_tree)
+        selected_outputs = self._get_ports_from_selected_items(self.midi_output_tree)
+
+        if not selected_inputs or not selected_outputs:
+            print("Break MIDI Connection: Select at least one input and one output MIDI port.")
+            return
+
+        print(f"Breaking MIDI connections for: Outputs={selected_outputs}, Inputs={selected_inputs}")
+        for out_port in selected_outputs:
+            for in_port in selected_inputs:
+                # We only need to attempt disconnection, Jack handles non-existent ones gracefully
+                self.break_midi_connection(out_port, in_port) # Use existing single MIDI disconnection method
 
     def update_undo_redo_buttons(self):
         self.undo_button.setEnabled(self.connection_history.can_undo())
@@ -1842,6 +2373,32 @@ class JackConnectionManager(QMainWindow):
                         self.break_connection(node_name, input_port.name)
                     else:
                         self.break_midi_connection(node_name, input_port.name)
+
+
+    def disconnect_selected_groups(self, group_items):
+        """Disconnects all connections for all ports within the selected group items."""
+        ports_to_disconnect = set()
+
+        for group_item in group_items:
+            # Ensure it's actually a group item (has children)
+            if group_item and group_item.childCount() > 0:
+                for i in range(group_item.childCount()):
+                    port_item = group_item.child(i)
+                    port_name = port_item.data(0, Qt.ItemDataRole.UserRole)
+                    if port_name:
+                        ports_to_disconnect.add(port_name)
+
+        if not ports_to_disconnect:
+            # print("No ports found in selected groups to disconnect.") # Optional: logging
+            return
+
+        # print(f"Disconnecting ports from selected groups: {ports_to_disconnect}") # Optional: logging
+        for port_name in ports_to_disconnect:
+            # Use the existing disconnect_node logic which handles connections
+            # and updates history/UI via break_connection/_port_operation
+            self.disconnect_node(port_name)
+
+        # No explicit refresh needed here as disconnect_node triggers updates
 
 
     def get_port_position(self, tree_widget, port_name, connection_view):
@@ -1968,38 +2525,74 @@ class JackConnectionManager(QMainWindow):
         self._on_port_clicked(item, self.midi_output_tree, self.midi_input_tree, True)
 
     def _on_port_clicked(self, item, clicked_tree, other_tree, is_midi):
-        """Handle port selection in tree widgets"""
-        # Only process clicks on port items (not groups)
-        if item.childCount() > 0:
-            # This is a group item, not a port item
-            return
+        """Handle selection in tree widgets for ports and groups, respecting Ctrl modifier."""
 
-        if is_midi:
-            self.clear_midi_highlights()
-        else:
-            self.clear_highlights()
+        # Check if Ctrl key is pressed during the click that triggered this handler
+        ctrl_pressed = QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier
 
-        clicked_tree.setCurrentItem(item)
-        port_name = item.data(0, Qt.ItemDataRole.UserRole)
-
-        if is_midi:
-            if clicked_tree == self.midi_input_tree:
-                self.highlight_midi_input(port_name)
-                self._highlight_connected_outputs_for_input(port_name, is_midi)
-                self.update_midi_connection_buttons()
+        if not ctrl_pressed:
+            # --- Standard Click Behavior (No Ctrl) ---
+            # 1. Clear previous highlights
+            if is_midi:
+                self.clear_midi_highlights()
             else:
-                self.highlight_midi_output(port_name)
-                self._highlight_connected_inputs_for_output(port_name, is_midi)
-                self.update_midi_connection_buttons()
-        else:
-            if clicked_tree == self.input_tree:
-                self.highlight_input(port_name)
-                self._highlight_connected_outputs_for_input(port_name, is_midi)
-                self.update_connection_buttons()
+                self.clear_highlights()
+
+            # 2. Set the current item in the tree that was clicked
+            #    (This implicitly clears other selections unless ExtendedSelection handles it,
+            #     but since we called super().mousePressEvent, it should work)
+            # clicked_tree.setCurrentItem(item) # Let the mousePressEvent handle selection setting
+
+            # Highlight the clicked item itself
+            port_name_or_group = item.data(0, Qt.ItemDataRole.UserRole) or item.text(0)
+            if is_midi:
+                 if clicked_tree == self.midi_input_tree: self.highlight_midi_input(port_name_or_group)
+                 else: self.highlight_midi_output(port_name_or_group)
             else:
-                self.highlight_output(port_name)
-                self._highlight_connected_inputs_for_output(port_name, is_midi)
+                 if clicked_tree == self.input_tree: self.highlight_input(port_name_or_group)
+                 else: self.highlight_output(port_name_or_group)
+
+        # --- Behavior for Both Ctrl+Click and Standard Click ---
+        # 3. Handle highlighting of connected items based on the *currently clicked* item
+        is_group_item = item.childCount() > 0
+
+        if is_group_item:
+            # Group item clicked - highlight connected groups and update buttons
+            if is_midi:
+                if clicked_tree == self.midi_input_tree:
+                    self._highlight_connected_output_groups_for_input_group(item, is_midi)
+                else: # Clicked on midi_output_tree
+                    self._highlight_connected_input_groups_for_output_group(item, is_midi)
+                self.update_midi_connection_buttons()
+            else: # Audio
+                if clicked_tree == self.input_tree:
+                    self._highlight_connected_output_groups_for_input_group(item, is_midi)
+                else: # Clicked on output_tree
+                    self._highlight_connected_input_groups_for_output_group(item, is_midi)
                 self.update_connection_buttons()
+        else:
+            # Port item clicked - perform highlighting and update buttons
+            port_name = item.data(0, Qt.ItemDataRole.UserRole)
+            if not port_name: return # Should not happen, but safety check
+
+            if is_midi:
+                if clicked_tree == self.midi_input_tree:
+                    self.highlight_midi_input(port_name)
+                    self._highlight_connected_outputs_for_input(port_name, is_midi)
+                    self.update_midi_connection_buttons()
+                else: # Clicked on midi_output_tree
+                    self.highlight_midi_output(port_name)
+                    self._highlight_connected_inputs_for_output(port_name, is_midi)
+                    self.update_midi_connection_buttons()
+            else: # Audio
+                if clicked_tree == self.input_tree:
+                    self.highlight_input(port_name)
+                    self._highlight_connected_outputs_for_input(port_name, is_midi)
+                    self.update_connection_buttons()
+                else: # Clicked on output_tree
+                    self.highlight_output(port_name)
+                    self._highlight_connected_inputs_for_output(port_name, is_midi)
+                    self.update_connection_buttons()
 
     def _highlight_connected_outputs_for_input(self, input_name, is_midi):
         try:
@@ -2034,6 +2627,75 @@ class JackConnectionManager(QMainWindow):
                     continue
         except jack.JackError as e:
             print(f"Error highlighting connected inputs: {e}")
+
+    def _highlight_connected_output_groups_for_input_group(self, input_group_item, is_midi):
+        """Finds and highlights output groups connected to the selected input group."""
+        input_ports = self._get_ports_in_group(input_group_item)
+        if not input_ports: return
+
+        output_tree = self.midi_output_tree if is_midi else self.output_tree
+        highlight_func = self._highlight_group_item # Use the new group highlight function
+
+        try:
+            # Iterate through all output ports to find connections to any port in the input group
+            output_port_objects = self.client.get_ports(is_output=True, is_midi=is_midi)
+            connected_output_groups = set() # Store names of groups to highlight
+
+            for output_port in output_port_objects:
+                try:
+                    # Check if output port exists before querying
+                    if not any(p.name == output_port.name for p in self.client.get_ports(is_output=True, is_midi=is_midi)):
+                        continue
+                    connections = self.client.get_all_connections(output_port)
+                    # Check if this output port connects to *any* port in the selected input group
+                    if any(conn.name in input_ports for conn in connections):
+                        # Find the group this output port belongs to
+                        output_item = output_tree.port_items.get(output_port.name)
+                        if output_item and output_item.parent():
+                            connected_output_groups.add(output_item.parent().text(0))
+                except jack.JackError:
+                    continue # Ignore errors for individual ports
+
+            # Highlight the identified groups
+            for group_name in connected_output_groups:
+                highlight_func(output_tree, group_name)
+
+        except jack.JackError as e:
+            print(f"Error highlighting connected output groups: {e}")
+
+    def _highlight_connected_input_groups_for_output_group(self, output_group_item, is_midi):
+        """Finds and highlights input groups connected to the selected output group."""
+        output_ports = self._get_ports_in_group(output_group_item)
+        if not output_ports: return
+
+        input_tree = self.midi_input_tree if is_midi else self.input_tree
+        highlight_func = self._highlight_group_item # Use the new group highlight function
+
+        try:
+            connected_input_groups = set() # Store names of groups to highlight
+
+            # Iterate through all ports in the selected output group
+            for output_name in output_ports:
+                try:
+                    # Check if output port exists before querying
+                    if not any(p.name == output_name for p in self.client.get_ports(is_output=True, is_midi=is_midi)):
+                        continue
+                    # Get all connections *from* this specific output port
+                    connections = self.client.get_all_connections(output_name)
+                    for input_port in connections:
+                        # Find the group this connected input port belongs to
+                        input_item = input_tree.port_items.get(input_port.name)
+                        if input_item and input_item.parent():
+                            connected_input_groups.add(input_item.parent().text(0))
+                except jack.JackError:
+                    continue # Ignore errors for individual ports
+
+            # Highlight the identified groups
+            for group_name in connected_input_groups:
+                highlight_func(input_tree, group_name)
+
+        except jack.JackError as e:
+            print(f"Error highlighting connected input groups: {e}")
 
     def highlight_input(self, input_name, auto_highlight=False):
         self._highlight_tree_item(self.input_tree, input_name, auto_highlight)
@@ -2071,6 +2733,13 @@ class JackConnectionManager(QMainWindow):
             port_item.setForeground(0, QBrush(
                 self.highlight_color if not auto_highlight else self.auto_highlight_color))
 
+    def _highlight_group_item(self, tree_widget, group_name):
+        """Highlight a specific group item in a tree widget"""
+        group_item = tree_widget.port_groups.get(group_name)
+        if group_item:
+            # Use the auto_highlight_color for connected groups
+            group_item.setForeground(0, QBrush(self.auto_highlight_color))
+
     def clear_highlights(self):
         self._clear_tree_highlights(self.input_tree)
         self._clear_tree_highlights(self.output_tree)
@@ -2080,10 +2749,14 @@ class JackConnectionManager(QMainWindow):
         self._clear_tree_highlights(self.midi_output_tree)
 
     def _clear_tree_highlights(self, tree_widget):
-        """Clear highlights from all port items in a tree widget"""
+        """Clear highlights from all group and port items in a tree widget"""
+        if not hasattr(tree_widget, 'topLevelItemCount'): return # Safety check
+
         for i in range(tree_widget.topLevelItemCount()):
             group_item = tree_widget.topLevelItem(i)
+            # Reset group item highlight
             group_item.setForeground(0, QBrush(self.text_color))
+            # Reset child item highlights
             for j in range(group_item.childCount()):
                 child_item = group_item.child(j)
                 child_item.setForeground(0, QBrush(self.text_color))
@@ -2101,30 +2774,94 @@ class JackConnectionManager(QMainWindow):
         self._update_port_connection_buttons(self.midi_input_tree, self.midi_output_tree,
                                            self.midi_connect_button, self.midi_disconnect_button)
 
-    def _update_port_connection_buttons(self, input_tree, output_tree, connect_button, disconnect_button):
-        """Update connection button states based on selected ports"""
-        input_port = input_tree.getSelectedPortName()
-        output_port = output_tree.getSelectedPortName()
+    def _are_groups_connected(self, output_ports, input_ports):
+        """Check if *any* connection exists between the two groups of ports."""
+        try:
+            for output_port in output_ports:
+                # Check if this output port exists before querying connections
+                # Use appropriate is_midi check based on port name heuristic or context if available
+                is_midi_heuristic = any('midi' in p.lower() for p in [output_port] + input_ports)
+                if not any(p.name == output_port for p in self.client.get_ports(is_output=True, is_midi=is_midi_heuristic)):
+                     continue # Skip if output port doesn't exist (e.g., just unregistered)
 
-        if input_port and output_port:
-            try:
-                # Check visibility as well - can't connect/disconnect hidden ports
-                input_item = input_tree.getPortItemByName(input_port)
-                output_item = output_tree.getPortItemByName(output_port)
-                if input_item and output_item and not input_item.isHidden() and not output_item.isHidden():
-                    connected = any(input_port == input_port_obj.name
-                                  for input_port_obj in self.client.get_all_connections(output_port))
-                    disconnect_button.setEnabled(connected)
-                    connect_button.setEnabled(not connected)
-                else:
-                    disconnect_button.setEnabled(False)
-                    connect_button.setEnabled(False)
-            except jack.JackError:
-                disconnect_button.setEnabled(False)
-                connect_button.setEnabled(False)
-        else:
-            disconnect_button.setEnabled(False)
-            connect_button.setEnabled(False)
+                connections = self.client.get_all_connections(output_port)
+                conn_names = [c.name for c in connections]
+                # Check if any connection target is within the input_ports list
+                if any(inp in conn_names for inp in input_ports):
+                    return True # Found at least one connection between the groups
+            return False # No connections found between any ports in the groups
+        except jack.JackError as e:
+            print(f"Error checking group connection status: {e}")
+            return False # Assume not connected on error
+
+    # Helper function (can be placed inside or outside the class)
+    def _get_ports_from_selected_items(self, tree_widget):
+        """
+        Returns a list of unique port names from selected items (ports and groups) in a tree.
+        If a group is selected, all its child ports are included.
+        """
+        port_names = set() # Use a set to automatically handle duplicates
+        for item in tree_widget.selectedItems():
+            if not item: continue
+
+            # Check if item is visible (basic check, might need refinement if filtering is complex)
+            # if item.isHidden(): continue # This check might be needed depending on filter implementation
+
+            if item.childCount() == 0: # Is a port item (leaf)
+                port_name = item.data(0, Qt.ItemDataRole.UserRole)
+                if port_name:
+                    port_names.add(port_name)
+            else: # Is a group item
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    # Check if child is visible
+                    # if child.isHidden(): continue
+                    port_name = child.data(0, Qt.ItemDataRole.UserRole)
+                    if port_name:
+                        port_names.add(port_name)
+        return list(port_names) # Return as a list
+        return port_names
+
+    def _check_if_any_connection_exists(self, output_ports, input_ports):
+        """Checks if at least one connection exists between any output port and any input port."""
+        if not output_ports or not input_ports:
+            return False
+        try:
+            for out_port in output_ports:
+                # Check connections for this output port
+                # Need to handle potential JackError if port disappears during check
+                try:
+                    connections = self.client.get_all_connections(out_port)
+                    connected_inputs = {c.name for c in connections}
+                    # If any of the desired input ports are connected to this output port, return True
+                    if any(in_port in connected_inputs for in_port in input_ports):
+                        return True
+                except jack.JackError:
+                    continue # Ignore error for this specific output port (might have disconnected)
+            # If we checked all output ports and found no connections to the desired inputs
+            return False
+        except jack.JackError as e:
+            # Broader error during the process
+            print(f"Error checking connections: {e}")
+            return False # Assume no connection on error
+
+    def _update_port_connection_buttons(self, input_tree, output_tree, connect_button, disconnect_button):
+        """Update connection button states based on selected ports (handles multi-select)."""
+        # Get lists of selected port names (only leaf items)
+        selected_input_ports = self._get_ports_from_selected_items(input_tree)
+        selected_output_ports = self._get_ports_from_selected_items(output_tree)
+
+        # Enable connect button only if at least one port is selected in BOTH trees
+        can_connect = bool(selected_input_ports and selected_output_ports)
+        connect_button.setEnabled(can_connect)
+
+        # Enable disconnect button only if a connection exists between ANY selected output and ANY selected input
+        can_disconnect = False
+        if can_connect: # Only check for connections if we have selections in both trees
+            can_disconnect = self._are_groups_connected(selected_output_ports, selected_input_ports)
+
+        disconnect_button.setEnabled(can_disconnect)
+
 
     def _handle_filter_change(self):
         """Handles text changes in the shared filter boxes."""
