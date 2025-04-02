@@ -1,6 +1,6 @@
 # Cable
 PyQT GUI application to dynamically modify Pipewire and Wireplumber settings at runtime.
-Now, with side by side connections manager, pw-top and latency test tabs.
+Now, with side by side connections manager (uses Python Jack Client so will not list Pipewire items), pw-top and latency test tabs.
 
 
 If you wonder what Latency option does, look [here](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html#alsa-extra-latency-properties). 
