@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QSystemTrayIcon, QMenu)
 
 # --- Application Version ---
-APP_VERSION = "0.9.2"
+APP_VERSION = "0.9.3"
 # -------------------------
 
 class AutostartManager:
@@ -704,7 +704,7 @@ class PipeWireSettingsApp(QWidget):
                 else:
                     self.hide()  # Minimize to tray
 
-    def launch_connection_manager(self):
+    def launch_connection_manager(self, headless=False): # Add headless parameter
         """Launch connection-manager.py as an independent process to avoid JACK errors in the main process"""
         try:
             # Define possible paths
@@ -725,20 +725,25 @@ class PipeWireSettingsApp(QWidget):
                 
                 # Connect signals to handle process state
                 self.connection_manager_process.finished.connect(self.on_connection_manager_closed)
-                
+
+                # Prepare arguments
+                arguments = [module_path]
+                if headless:
+                    arguments.append('--headless') # Add headless argument if requested
+
                 # Set up the command
                 if self.flatpak_env:
                     # In Flatpak, we need to use flatpak-spawn to run the Python interpreter
                     self.connection_manager_process.setProgram('flatpak-spawn')
-                    self.connection_manager_process.setArguments(['--host', 'python3', module_path])
+                    self.connection_manager_process.setArguments(['--host', 'python3'] + arguments) # Pass arguments
                 else:
                     # Normal execution
                     self.connection_manager_process.setProgram('python3')
-                    self.connection_manager_process.setArguments([module_path])
-                
+                    self.connection_manager_process.setArguments(arguments) # Pass arguments
+
                 # Start the process
                 self.connection_manager_process.start()
-                print(f"Started connection manager as separate process using {module_path}")
+                print(f"Started connection manager {'headless ' if headless else ''}using {module_path}") # Update log
             else:
                 # Process exists but it might be terminated
                 if self.connection_manager_process.state() == QProcess.ProcessState.NotRunning:
@@ -1512,6 +1517,9 @@ def main():
         ex.hide()
         # Force a complete refresh of settings after a short delay
         # This simulates clicking the "Refresh" button when starting minimized
+        # Also launch connection manager to load startup preset if configured
+        print("Cable started minimized, launching connection manager...") # Add log
+        ex.launch_connection_manager(headless=True) # Pass headless=True
         QTimer.singleShot(1000, ex.load_current_settings)
     else:
         # Show window normally

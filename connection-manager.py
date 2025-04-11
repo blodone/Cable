@@ -1,18 +1,21 @@
 import sys
 import random
 import re
+import argparse # <-- Add argparse
 import configparser
 import os
 import shutil # Import shutil for command existence check
+import json # <-- Add import for JSON handling
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
                              QGraphicsPathItem, QCheckBox, QMenu, QSizePolicy, QSpacerItem,
                              QButtonGroup, QTextEdit, QTreeWidget, QTreeWidgetItem, QLineEdit,
-                             QComboBox) # Added QLineEdit and QComboBox here
+                             QComboBox, QMessageBox, QWidgetAction) # Added QLineEdit, QComboBox, QMessageBox, QWidgetAction
 from PyQt6.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect, QProcess, pyqtSignal, QPoint
 from PyQt6.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
-                         QPainterPath, QFontMetrics, QFont, QAction, QPixmap, QGuiApplication, QTextCursor) # Added QTextCursor
+                         QPainterPath, QFontMetrics, QFont, QAction, QPixmap, QGuiApplication, QTextCursor, QActionGroup,
+                         QKeySequence) # Added QTextCursor, QKeySequence
 import jack
 
 # Add custom handler for unraisable exceptions
@@ -58,7 +61,9 @@ class ConfigManager:
             'tray_enabled': 'True',
             'tray_click_opens_cables': 'True',
             'auto_refresh_enabled': 'True',  # Add default for auto refresh
-            'collapse_all_enabled': 'False'  # Add default for collapse all
+            'collapse_all_enabled': 'False', # Add default for collapse all
+            'port_list_font_size': '10',      # Add default for port list font size
+            'untangle_mode': '0'             # Add default for untangle sort mode (0=off, 1=normal, 2=reversed)
         }
 
         for key, value in defaults.items():
@@ -75,19 +80,152 @@ class ConfigManager:
         return self.config['DEFAULT'].getboolean(key, default)
 
     def set_bool(self, key, value):
-        self.config['DEFAULT'][key] = 'true' if value else 'false'
+        self.config['DEFAULT'][key] = 'True' if value else 'False' # Use title case for consistency
         self.save_config()
+ 
+    def get_int(self, key, default=0):
+        return self.config['DEFAULT'].getint(key, default)
+ 
+    def set_int(self, key, value):
+        self.config['DEFAULT'][key] = str(value)
+        self.save_config()
+
+    def get_str(self, key, default=None):
+        return self.config['DEFAULT'].get(key, default)
+
+    def set_str(self, key, value):
+        self.config['DEFAULT'][key] = str(value) if value is not None else ''
+        self.save_config()
+ 
+
+# --- Add PresetManager Class ---
+class PresetManager:
+    def __init__(self):
+        self.config_dir = os.path.expanduser('~/.config/cable')
+        self.presets_dir = os.path.join(self.config_dir, 'presets') # Directory for individual preset files
+        # Ensure presets directory exists
+        if not os.path.exists(self.presets_dir):
+            try:
+                # Create parent config dir first if it doesn't exist
+                if not os.path.exists(self.config_dir):
+                    os.makedirs(self.config_dir)
+                os.makedirs(self.presets_dir) # Then create presets dir
+            except OSError as e:
+                print(f"Error creating presets directory {self.presets_dir}: {e}")
+
+    def load_presets(self):
+        """Loads all presets from individual files in the presets directory."""
+        presets = {}
+        if not os.path.exists(self.presets_dir):
+            return presets # Return empty if directory doesn't exist
+
+        for filename in os.listdir(self.presets_dir):
+            if filename.endswith(".json"):
+                preset_name = filename[:-5] # Remove .json extension
+                filepath = os.path.join(self.presets_dir, filename)
+                try:
+                    with open(filepath, 'r') as f:
+                        preset_data = json.load(f)
+                        # Add basic validation if needed (e.g., check if it's a list)
+                        if isinstance(preset_data, list): # Assuming presets are lists of connections
+                             presets[preset_name] = preset_data
+                        else:
+                            print(f"Warning: Preset file {filename} does not contain a valid list. Skipping.")
+                except json.JSONDecodeError:
+                    print(f"Error decoding JSON from {filepath}. Skipping preset '{preset_name}'.")
+                except Exception as e:
+                    print(f"Error loading preset '{preset_name}' from {filepath}: {e}")
+        return presets
+
+    # Removed save_presets method as presets are saved individually now
+
+    def get_preset_names(self):
+        """Returns a sorted list of preset names by scanning the presets directory."""
+        names = []
+        if not os.path.exists(self.presets_dir):
+            return names
+        for filename in os.listdir(self.presets_dir):
+            if filename.endswith(".json"):
+                names.append(filename[:-5]) # Remove .json extension
+        return sorted(names)
+
+    def get_preset(self, name):
+        """Loads and returns the connection list for a specific preset name from its file."""
+        preset_file = os.path.join(self.presets_dir, f"{name}.json")
+        if not os.path.exists(preset_file):
+            print(f"Preset file not found: {preset_file}")
+            return None
+        try:
+            with open(preset_file, 'r') as f:
+                preset_data = json.load(f)
+                # Add validation if needed
+                if isinstance(preset_data, list):
+                    return preset_data
+                else:
+                    print(f"Warning: Preset file {preset_file} does not contain a valid list.")
+                    return None
+        except json.JSONDecodeError:
+            print(f"Error decoding JSON from {preset_file}.")
+            return None
+        except Exception as e:
+            print(f"Error loading preset '{name}' from {preset_file}: {e}")
+            return None
+
+    def save_preset(self, name, connection_list, parent_widget=None, confirm_overwrite=True): # Added confirm_overwrite=True
+        """Saves a specific preset to its own JSON file, asking for overwrite confirmation."""
+        if not name: # Prevent saving with empty names
+            QMessageBox.warning(parent_widget, "Save Error", "Preset name cannot be empty.")
+            return False
+        if not isinstance(connection_list, list):
+             QMessageBox.warning(parent_widget, "Save Error", f"Invalid data type for connection_list for preset '{name}'. Must be a list.")
+             return False
+
+        preset_file = os.path.join(self.presets_dir, f"{name}.json")
+
+        # --- Overwrite Check ---
+        if confirm_overwrite and os.path.exists(preset_file): # Check confirm_overwrite flag
+            reply = QMessageBox.question(parent_widget, 'Confirm Overwrite',
+                                         f"A preset named '{name}' already exists.\\nDo you want to overwrite it?",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                         QMessageBox.StandardButton.No) # Default to No
+            if reply == QMessageBox.StandardButton.No:
+                print(f"Overwrite cancelled for preset '{name}'.")
+                return False # User chose not to overwrite
+        # --- End Overwrite Check ---
+
+        try:
+            with open(preset_file, 'w') as f:
+                json.dump(connection_list, f, indent=4) # Save only the list
+            print(f"Preset '{name}' saved to {preset_file}")
+            # Optionally show a success message (can be brief)
+            # show_timed_messagebox(parent_widget, QMessageBox.Icon.Information, "Preset Saved", f"Preset '{name}' saved successfully.", 1000)
+            return True
+        except Exception as e:
+            error_message = f"Error saving preset '{name}' to {preset_file}: {e}"
+            print(error_message)
+            QMessageBox.critical(parent_widget, "Save Error", error_message)
+            return False
+
+    def delete_preset(self, name):
+        """Deletes a specific preset file."""
+        preset_file = os.path.join(self.presets_dir, f"{name}.json")
+        if os.path.exists(preset_file):
+            try:
+                os.remove(preset_file)
+                print(f"Preset '{name}' deleted from {preset_file}")
+                return True
+            except OSError as e:
+                print(f"Error deleting preset file {preset_file}: {e}")
+                return False
+        else:
+            print(f"Preset file not found for deletion: {preset_file}")
+            return False # Or True if not finding it is acceptable
+# --- End PresetManager Class ---
 
 
 class ElidedListWidgetItem(QListWidgetItem):
-    def __init__(self, text, parent=None):
-        super().__init__(parent)
-        self.full_text = text
-        self.setText(self.full_text)
-
-    def elide_text(self, text, width):
-        font_metrics = QFontMetrics(self.font())
-        return font_metrics.elidedText(text, Qt.TextElideMode.ElideRight, width)
+    # ... (keep existing ElidedListWidgetItem code) ...
+    pass # Keep existing code
 
 class PortTreeWidget(QTreeWidget):
     """A tree widget for displaying ports with collapsible groups"""
@@ -105,6 +243,7 @@ class PortTreeWidget(QTreeWidget):
         self.setIndentation(15)
         self.port_groups = {}  # Maps group names to group items
         self.port_items = {}   # Maps port names to port items
+        self.group_order = []  # Stores the current order of top-level group names
         self.setDragEnabled(True)
         # Allow selecting multiple items with Ctrl/Shift
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
@@ -118,33 +257,278 @@ class PortTreeWidget(QTreeWidget):
         # Add storage for mouse press position
         self.mousePressPos = None
 
+        # --- Add Actions for Shortcuts ---
+        self._move_up_action = QAction("Move Up", self)
+        self._move_up_action.setShortcut(QKeySequence("Alt+Up"))
+        self._move_up_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut) # Set context
+        self._move_up_action.triggered.connect(self._trigger_move_up)
+        self.addAction(self._move_up_action)
+
+        self._move_down_action = QAction("Move Down", self)
+        self._move_down_action.setShortcut(QKeySequence("Alt+Down"))
+        self._move_down_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut) # Set context
+        self._move_down_action.triggered.connect(self._trigger_move_down)
+        self.addAction(self._move_down_action)
+        # --- End Actions for Shortcuts ---
     def sizeHint(self):
         return QSize(self._width, 300)  # Default height
 
-    def addPort(self, port_name):
-        # Extract group name (everything before the colon)
-        group_name = port_name.split(':', 1)[0] if ':' in port_name else "Ungrouped"
+    # Removed addPort method, replaced by populate_tree
 
-        # Create group if it doesn't exist
-        if group_name not in self.port_groups:
+    def get_current_group_order(self):
+        """Returns a list of the current top-level group item names in their visual order."""
+        order = []
+        for i in range(self.topLevelItemCount()):
+            item = self.topLevelItem(i)
+            if item: # Basic check
+                order.append(item.text(0))
+        return order
+
+    def _sort_items_naturally(self, items):
+        """Sorts a list of strings using natural sorting (handles numbers)."""
+        def get_sort_key(item_name):
+            # Treat None or non-string items gracefully if they somehow appear
+            if not isinstance(item_name, str):
+                return [] # Or handle as appropriate
+            parts = re.split(r'(\d+)', item_name)
+            key = []
+            for part in parts:
+                if part.isdigit():
+                    key.append(int(part))
+                else:
+                    key.append(part.lower())
+            return key
+        # Filter out None before sorting if necessary, though item_name should always be str here
+        return sorted([item for item in items if isinstance(item, str)], key=get_sort_key)
+
+    def _calculate_untangled_order(self, all_ports, current_groups, ports_by_group, untangle_mode):
+        """Calculates the group order based on connections.
+        untangle_mode: 0=off, 1=normal (outputs drive inputs), 2=reversed (inputs drive outputs)
+        """
+        if untangle_mode == 0: # Should not be called if mode is 0, but handle defensively
+             return self._sort_items_naturally(list(current_groups))
+ 
+        connections = self.window()._get_current_connections()
+        is_input_tree = isinstance(self, DropPortTreeWidget) # Check if this is the input tree
+        is_midi = self.window().port_type == 'midi' # Determine if we are dealing with MIDI ports
+
+        # print(f"\\n=== Untangle Sorting Debug ===")
+        # print(f"Tree type: {'Input' if is_input_tree else 'Output'}")
+        # print(f"All groups (current tree): {current_groups}") # Keep for context if needed
+        # print(f"Ports by group (current tree): {ports_by_group}") # Keep for context if needed
+        # print(f"All connections: {connections}")
+
+        connected_output_groups = set()
+        connected_input_groups = set()
+        output_to_inputs = {} # {output_port: {input_port1, input_port2}}
+        input_to_outputs = {} # {input_port: {output_port1, output_port2}}
+        group_to_group_connections = {} # {input_group: {output_group1, output_group2}}
+
+        for conn_dict in connections:
+            out_port = conn_dict.get('output')
+            in_port = conn_dict.get('input')
+            if not out_port or not in_port: # Skip if keys are missing or values are None/empty
+                continue
+            # Ensure we only process connections relevant to the current port type (audio/midi)
+            conn_type = conn_dict.get("type", "audio") # Default to audio if type missing
+            if (is_midi and conn_type != 'midi') or (not is_midi and conn_type != 'audio'):
+                continue
+
+            out_group = out_port.split(':', 1)[0] if ':' in out_port else out_port
+            in_group = in_port.split(':', 1)[0] if ':' in in_port else in_port
+
+            connected_output_groups.add(out_group)
+            connected_input_groups.add(in_group)
+
+            if out_port not in output_to_inputs: output_to_inputs[out_port] = set()
+            output_to_inputs[out_port].add(in_port)
+
+            if in_port not in input_to_outputs: input_to_outputs[in_port] = set()
+            input_to_outputs[in_port].add(out_port)
+
+            # Track group-to-group connections
+            if in_group not in group_to_group_connections:
+                group_to_group_connections[in_group] = set()
+            group_to_group_connections[in_group].add(out_group)
+
+        # print(f"\\nConnected output groups ({'MIDI' if is_midi else 'Audio'}): {connected_output_groups}")
+        # print(f"Connected input groups ({'MIDI' if is_midi else 'Audio'}): {connected_input_groups}")
+        # print(f"Output to Inputs map: {output_to_inputs}") # Optional detailed debug
+        # print(f"Input to Outputs map: {input_to_outputs}") # Optional detailed debug
+        # print(f"Group to group connections (Input -> Outputs): {group_to_group_connections}")
+
+        # --- Determine Primary and Secondary Groups based on mode ---
+        primary_is_output = (untangle_mode == 1) # Normal mode: Outputs are primary
+ 
+        # --- Get ALL primary groups for consistent numbering ---
+        all_system_primary_ports = []
+        try:
+             # Fetch ports matching the current type (audio/midi) based on primary role
+             all_system_primary_ports = self.window().client.get_ports(
+                 is_output=primary_is_output,
+                 is_input=not primary_is_output,
+                 is_midi=is_midi,
+                 is_audio=not is_midi
+             )
+        except jack.JackError as e:
+             print(f"Warning: Error fetching all system primary ports: {e}")
+ 
+        all_primary_group_names = set()
+        for port in all_system_primary_ports:
+            if port and hasattr(port, 'name') and port.name: # Basic validation
+                group_name = port.name.split(':', 1)[0] if ':' in port.name else port.name
+                all_primary_group_names.add(group_name)
+        # print(f"All system primary group names ({'MIDI' if is_midi else 'Audio'}): {all_primary_group_names}")
+        # --- End Get ALL primary groups ---
+
+
+        # --- Primary Group Numbering (Based on ALL primary groups) ---
+        naturally_sorted_all_primary_groups = self._sort_items_naturally(list(all_primary_group_names))
+        # print(f"\\nNaturally sorted ALL primary groups: {naturally_sorted_all_primary_groups}")
+ 
+        # Create a consistent set of primary group numbers that will be used for both trees
+        primary_group_numbers = {}
+        number_counter = 1
+        connected_primary_groups = connected_output_groups if primary_is_output else connected_input_groups
+        for group_name in naturally_sorted_all_primary_groups:
+            # Assign number only if the primary group is actually connected to something
+            if group_name in connected_primary_groups:
+                primary_group_numbers[group_name] = number_counter
+                number_counter += 1
+ 
+        # print(f"\\nPrimary group numbers (Connected Only): {primary_group_numbers}")
+
+        # --- Secondary Group Numbering (Based on connections to numbered primary groups) ---
+        secondary_group_numbers = {}
+        connected_secondary_groups = connected_input_groups if primary_is_output else connected_output_groups
+        # Iterate over the groups present in the *current* tree that are connected secondary groups
+        for group_name in current_groups:
+            if group_name in connected_secondary_groups: # Check if this secondary group has connections
+                # print(f"\\nProcessing secondary group: {group_name}") # Keep debug if needed
+                min_primary_group_number = None
+ 
+                # Find the minimum number of the primary group(s) it connects to
+                if primary_is_output: # Normal: Secondary=Input, Primary=Output
+                    # Find minimum numbered output group this input group connects TO
+                    if group_name in group_to_group_connections: # group_to_group_connections maps input -> {outputs}
+                        for connected_primary_group in group_to_group_connections[group_name]:
+                            if connected_primary_group in primary_group_numbers:
+                                primary_number = primary_group_numbers[connected_primary_group]
+                                # print(f"  Connected to primary (output) group {connected_primary_group} with number {primary_number}")
+                                if min_primary_group_number is None or primary_number < min_primary_group_number:
+                                    min_primary_group_number = primary_number
+                else: # Reversed: Secondary=Output, Primary=Input
+                    # Find minimum numbered input group this output group connects FROM
+                    # We need to iterate through the input_to_outputs map or rebuild group_to_group reversed
+                    # Let's iterate through connections again for simplicity here, could optimize
+                    min_primary_group_number = None
+                    for conn_dict in connections:
+                         out_port = conn_dict.get('output')
+                         in_port = conn_dict.get('input')
+                         if not out_port or not in_port: continue
+                         conn_type = conn_dict.get("type", "audio")
+                         if (is_midi and conn_type != 'midi') or (not is_midi and conn_type != 'audio'): continue
+ 
+                         out_group = out_port.split(':', 1)[0] if ':' in out_port else out_port
+                         in_group = in_port.split(':', 1)[0] if ':' in in_port else in_port
+ 
+                         if out_group == group_name: # If this output group is the one we're processing
+                             if in_group in primary_group_numbers: # And it connects to a numbered primary (input) group
+                                 primary_number = primary_group_numbers[in_group]
+                                 # print(f"  Connected FROM primary (input) group {in_group} with number {primary_number}")
+                                 if min_primary_group_number is None or primary_number < min_primary_group_number:
+                                     min_primary_group_number = primary_number
+ 
+                if min_primary_group_number is not None:
+                    secondary_group_numbers[group_name] = min_primary_group_number
+                # else: # Debugging
+                #     # print(f"  Secondary group '{group_name}' not assigned a number (no connection to a *numbered* primary group found).")
+ 
+        # print(f"\\nSecondary group numbers (Derived): {secondary_group_numbers}")
+
+        # --- Create final orders for the CURRENT tree ---
+        # Note: We use 'current_groups' here because we are ordering the items for the specific tree (Input or Output)
+        # that this function call is processing.
+
+        # --- Create final orders for the CURRENT tree ---
+ 
+        # Determine which numbers to use based on tree type and mode
+        if is_input_tree: # Sorting the INPUT tree
+            if primary_is_output: # Normal mode: Input tree uses secondary numbers
+                group_numbers_to_use = secondary_group_numbers
+            else: # Reversed mode: Input tree uses primary numbers
+                group_numbers_to_use = primary_group_numbers
+        else: # Sorting the OUTPUT tree
+            if primary_is_output: # Normal mode: Output tree uses primary numbers
+                group_numbers_to_use = primary_group_numbers
+            else: # Reversed mode: Output tree uses secondary numbers
+                group_numbers_to_use = secondary_group_numbers
+ 
+        # Generic sorting logic using the determined numbers
+        numbered_groups_for_current_tree = sorted(
+            [gn for gn in current_groups if gn in group_numbers_to_use], # Groups in current tree AND numbered
+            key=lambda gn: group_numbers_to_use[gn]
+        )
+        unconnected_groups_for_current_tree = self._sort_items_naturally(
+            [gn for gn in current_groups if gn not in group_numbers_to_use] # Groups in current tree but NOT numbered
+        )
+        final_order = numbered_groups_for_current_tree + unconnected_groups_for_current_tree
+
+        # print(f"\\nFinal calculated order for this {'Input' if is_input_tree else 'Output'} tree (Mode {untangle_mode}): {final_order}")
+        # print("=== End Debug ===\\n")
+ 
+        return final_order
+
+    def populate_tree(self, all_ports, previous_group_order):
+        """Clears and repopulates the tree, preserving group order or using untangle sort."""
+        # 1. Determine current groups and ports per group (remains the same)
+        current_groups = set()
+        ports_by_group = {}
+        for port_name in all_ports:
+            group_name = port_name.split(':', 1)[0] if ':' in port_name else "Ungrouped"
+            current_groups.add(group_name)
+            if group_name not in ports_by_group:
+                ports_by_group[group_name] = []
+            ports_by_group[group_name].append(port_name)
+
+        # 2. Determine final group order based on untangle mode
+        untangle_mode = self.window().untangle_mode # Get current mode from main window
+        if untangle_mode > 0:
+            # Use the untangle logic with the current mode
+            final_ordered_group_names = self._calculate_untangled_order(all_ports, current_groups, ports_by_group, untangle_mode)
+        else:
+            # Apply natural sorting to all groups when untangle is disabled
+            final_ordered_group_names = self._sort_items_naturally(list(current_groups))
+
+        # 3. Clear internal state
+        self.port_groups = {}
+        self.port_items = {}
+        self.clear()
+
+        # 4. Create and add groups in the determined order
+        for group_name in final_ordered_group_names:
             group_item = QTreeWidgetItem(self)
             group_item.setText(0, group_name)
             group_item.setFlags(group_item.flags() | Qt.ItemFlag.ItemIsAutoTristate)
-            group_item.setExpanded(True)  # Expanded by default
+            group_item.setExpanded(True)  # Default to expanded
             self.port_groups[group_name] = group_item
 
-        # Add port as child of group
-        port_item = QTreeWidgetItem(self.port_groups[group_name])
-        port_item.setText(0, port_name)
-        port_item.setData(0, Qt.ItemDataRole.UserRole, port_name)  # Store full port name
-        self.port_items[port_name] = port_item
+            # Sort ports within each group naturally
+            sorted_ports = self._sort_items_naturally(ports_by_group[group_name])
+            for port_name in sorted_ports:
+                port_item = QTreeWidgetItem(group_item)
+                port_item.setText(0, port_name)
+                port_item.setData(0, Qt.ItemDataRole.UserRole, port_name)  # Store full port name
+                self.port_items[port_name] = port_item
 
-        return port_item
+        # 5. Update the internal group order state
+        self.group_order = final_ordered_group_names
 
     def clear(self):
         super().clear()
         self.port_groups = {}
         self.port_items = {}
+        self.group_order = [] # Reset stored order on clear
 
     def expandCollapseGroup(self, group_name, expand):
         """Expand or collapse a specific group by name"""
@@ -213,6 +597,19 @@ class PortTreeWidget(QTreeWidget):
                 menu.addSeparator()
                 menu.addAction(disconnect_group_action)
 
+                # --- Add Move Up/Down Actions ---
+                menu.addSeparator()
+                # Use the instance actions created in __init__
+                # Update their enabled state based on the context item
+                current_index = self.indexOfTopLevelItem(item)
+                self._move_up_action.setEnabled(current_index > 0)
+                self._move_down_action.setEnabled(current_index < self.topLevelItemCount() - 1)
+
+                # Add the existing actions to the menu
+                menu.addAction(self._move_up_action)
+                menu.addAction(self._move_down_action)
+                # --- End Move Up/Down Actions ---
+
                 menu.exec(self.mapToGlobal(position))
 
     def getSelectedPortNames(self):
@@ -274,6 +671,47 @@ class PortTreeWidget(QTreeWidget):
                 if self.initialSelection.childCount() == 0:
                     self.startDrag()
         super().mouseMoveEvent(event)
+
+    def move_group_up(self, item):
+        """Moves the specified group item one position up in the tree."""
+        current_index = self.indexOfTopLevelItem(item)
+        if current_index > 0:
+            # Store expansion state
+            is_expanded = item.isExpanded()
+            # Take item out and insert it one position higher
+            taken_item = self.takeTopLevelItem(current_index)
+            self.insertTopLevelItem(current_index - 1, taken_item)
+            # Restore expansion state
+            taken_item.setExpanded(is_expanded)
+            self.setCurrentItem(taken_item) # Keep the moved item selected
+            self.group_order = self.get_current_group_order() # Update stored order
+
+    def move_group_down(self, item):
+        """Moves the specified group item one position down in the tree."""
+        current_index = self.indexOfTopLevelItem(item)
+        if current_index < self.topLevelItemCount() - 1:
+            # Store expansion state
+            is_expanded = item.isExpanded()
+            # Take item out and insert it one position lower
+            taken_item = self.takeTopLevelItem(current_index)
+            self.insertTopLevelItem(current_index + 1, taken_item)
+            # Restore expansion state
+            taken_item.setExpanded(is_expanded)
+            self.setCurrentItem(taken_item) # Keep the moved item selected
+            self.group_order = self.get_current_group_order() # Update stored order
+
+    def _trigger_move_up(self):
+        """Slot for the move up shortcut action."""
+        item = self.currentItem()
+        if item and item.parent() is None: # Only move top-level items (groups)
+            self.move_group_up(item)
+
+    def _trigger_move_down(self):
+        """Slot for the move down shortcut action."""
+        item = self.currentItem()
+        if item and item.parent() is None: # Only move top-level items (groups)
+            self.move_group_down(item)
+
 
 class DragPortTreeWidget(PortTreeWidget):  # Output Tree
     def __init__(self, parent=None):
@@ -753,15 +1191,37 @@ class ConnectionHistory:
             return self.history[self.current_index]
         return None
 
+# Helper function to show a self-closing message box
+def show_timed_messagebox(parent, icon, title, text, duration=1000):
+    msgBox = QMessageBox(parent)
+    msgBox.setIcon(icon)
+    msgBox.setWindowTitle(title)
+    msgBox.setText(text)
+    msgBox.setStandardButtons(QMessageBox.StandardButton.NoButton) # No buttons needed
+    QTimer.singleShot(duration, msgBox.accept) # Close after duration
+    msgBox.exec()
+
+
 class JackConnectionManager(QMainWindow):
     # PyQt signals for port registration events
     port_registered = pyqtSignal(str, bool)  # port name, is_input
     port_unregistered = pyqtSignal(str, bool)  # port name, is_input
+    untangle_mode_changed = pyqtSignal(int) # Signal for mode change
 
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
+        self.preset_manager = PresetManager() # <-- Instantiate PresetManager
+        self.untangle_mode = self.config_manager.get_int('untangle_mode', 0) # Initialize untangle mode early
+        self.untangle_button = None # Initialize button attribute
+        self.startup_preset_name = self.config_manager.get_str('startup_preset') # Load startup preset name
+        # --- Read active preset from config ---
+        self.active_preset_name_from_config = self.config_manager.get_str('active_preset')
+        # Initialize current_preset_name based on the last run's active preset
+        self.current_preset_name = self.active_preset_name_from_config # Track the currently loaded preset
+        # --- End read active preset ---
         self.minimize_on_close = True
+        # ... (rest of __init__ remains largely the same for now) ...
         self.setWindowTitle('Cables')
         self.setGeometry(100, 100, 1368, 1000)
         self.initial_middle_width = 250
@@ -770,9 +1230,17 @@ class JackConnectionManager(QMainWindow):
         self.connections = set()
         self.connection_colors = {}
         self.connection_history = ConnectionHistory()
+        # self.untangle_enabled removed, using self.untangle_mode initialized earlier
         self.dark_mode = self.is_dark_mode()
         self.setup_colors()
-        self.callbacks_enabled = True
+        self.callbacks_enabled = self.config_manager.get_bool('auto_refresh_enabled', True) # Initialize from config
+        self.is_focused = self.isActiveWindow() # Track initial focus state
+
+        # Load and store initial port list font size
+        try:
+            self.port_list_font_size = int(self.config_manager.get_str('port_list_font_size', '10'))
+        except ValueError:
+            self.port_list_font_size = 10 # Default if config value is invalid
 
         # Create filter edit widgets (will be placed in bottom layout later)
         self.output_filter_edit = QLineEdit()
@@ -804,6 +1272,7 @@ class JackConnectionManager(QMainWindow):
         # Store selected physical port aliases for latency test
         self.latency_selected_input_alias = None
         self.latency_selected_output_alias = None
+        # self.current_preset_name = None # Track the currently loaded preset - Initialized from config now
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -828,7 +1297,7 @@ class JackConnectionManager(QMainWindow):
         self.tab_widget.addTab(self.latency_tab_widget, "Latency Test") # Added Latency Tab
         self.tab_widget.currentChanged.connect(self.switch_tab)
 
-        self.setup_bottom_layout(main_layout)
+        self.setup_bottom_layout(main_layout) # <-- Preset button will be added here later
 
         # Initialize the startup refresh timer
         self.startup_refresh_timer = QTimer()
@@ -841,7 +1310,10 @@ class JackConnectionManager(QMainWindow):
         self.client.activate()
 
         # Start the rapid refresh sequence immediately
-        self.start_startup_refresh()
+        # self.start_startup_refresh() # Don't start automatically, will be triggered in main()
+
+        # Setup keyboard shortcuts
+        self.setup_shortcuts()
 
     def start_startup_refresh(self):
         """Start the rapid refresh sequence on startup"""
@@ -875,6 +1347,8 @@ class JackConnectionManager(QMainWindow):
             # Apply collapse state after startup refresh is complete
             if hasattr(self, 'collapse_all_checkbox') and self.collapse_all_checkbox.isChecked():
                 self.apply_collapse_state_to_all_trees()
+
+            # Preset loading is now handled exclusively in main() for headless mode
 
     def setup_pwtop_tab(self, tab_widget):
         """Set up the pw-top statistics tab"""
@@ -1210,30 +1684,46 @@ class JackConnectionManager(QMainWindow):
         self.latency_refresh_button.clicked.connect(self._populate_latency_combos) # Connect to refresh method
         # --- End Refresh Button ---
 
-        # Input Row
+        # --- Combo Boxes Layout ---
+        # Create a container widget for combo boxes to easily get their width later
+        combo_box_container = QWidget()
+        combo_box_layout = QVBoxLayout(combo_box_container)
+        combo_box_layout.setContentsMargins(0, 0, 0, 0) # Remove margins for accurate width
+
+        # Input Row - Label removed
         input_combo_layout = QHBoxLayout()
-        input_combo_layout.addWidget(QLabel("Input  Port:  "))
-        input_combo_layout.addWidget(self.latency_input_combo, 1) # Add stretch factor
-        input_combo_layout.addStretch(1) # Add spacer to limit dropdown width
-        layout.addLayout(input_combo_layout)
+        # input_label = QLabel("Input  Port:  ") # Removed
+        # input_combo_layout.addWidget(input_label) # Removed
+        input_combo_layout.addWidget(self.latency_input_combo)
+        input_combo_layout.addStretch(1) # Add stretch to push combo box left
+        combo_box_layout.addLayout(input_combo_layout)
 
-        # Output Row
+        # Output Row - Label removed
         output_combo_layout = QHBoxLayout()
-        output_combo_layout.addWidget(QLabel("Output Port:"))
-        output_combo_layout.addWidget(self.latency_output_combo, 1) # Add stretch factor
-        output_combo_layout.addStretch(1) # Add spacer to limit dropdown width
-        layout.addLayout(output_combo_layout)
+        # output_label = QLabel("Output Port:") # Removed
+        # output_combo_layout.addWidget(output_label) # Removed
+        output_combo_layout.addWidget(self.latency_output_combo)
+        output_combo_layout.addStretch(1) # Add stretch to push combo box left
+        combo_box_layout.addLayout(output_combo_layout)
 
-        # Add Refresh button separately below the dropdowns
+        # Add the container to the main layout
+        layout.addWidget(combo_box_container)
+
+        # --- Refresh Button Layout ---
+        # Align refresh button below the combo boxes, left-aligned
         refresh_button_layout = QHBoxLayout()
-        refresh_button_layout.addStretch(1) # Push button to the right
         refresh_button_layout.addWidget(self.latency_refresh_button)
+        refresh_button_layout.addStretch(1) # Push button to the left
         layout.addLayout(refresh_button_layout)
+
+        # Add vertical space between refresh and start/stop buttons
+        layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)) # Increased spacer height
+
         # --- End Combo Boxes ---
 
 
-        # Buttons Layout
-        button_layout = QHBoxLayout()
+        # --- Start/Stop Buttons Layout ---
+        start_stop_button_layout = QHBoxLayout()
         self.latency_run_button = QPushButton('Start measurement')
         self.latency_run_button.setStyleSheet(self.button_stylesheet())
         self.latency_run_button.clicked.connect(self.run_latency_test)
@@ -1243,14 +1733,18 @@ class JackConnectionManager(QMainWindow):
         self.latency_stop_button.clicked.connect(self.stop_latency_test)
         self.latency_stop_button.setEnabled(False) # Initially disabled
 
-        button_layout.addWidget(self.latency_run_button)
-        button_layout.addWidget(self.latency_stop_button)
-        layout.addLayout(button_layout) # Add the horizontal layout for buttons
+        # Add buttons, allowing them to size naturally
+        start_stop_button_layout.addWidget(self.latency_run_button) # Removed stretch factor
+        start_stop_button_layout.addWidget(self.latency_stop_button) # Removed stretch factor
+        start_stop_button_layout.addStretch(2) # Add stretch to the right to keep buttons left-aligned
+
+        layout.addLayout(start_stop_button_layout) # Add the horizontal layout for buttons
 
         # Raw Output Toggle Checkbox
         self.latency_raw_output_checkbox = QCheckBox("Show Raw Output (Continuous)")
+        self.latency_raw_output_checkbox.setToolTip("If 'ON', measurement has to be stopped manually with 'Stop' button") # Added tooltip
         self.latency_raw_output_checkbox.setStyleSheet(f"color: {self.text_color.name()};") # Style checkbox text
-        layout.addWidget(self.latency_raw_output_checkbox) # Add checkbox below buttons
+        # Checkbox will be added after the results text edit
 
         # Results Text Edit
         self.latency_results_text = QTextEdit()
@@ -1266,6 +1760,7 @@ class JackConnectionManager(QMainWindow):
         """)
         self.latency_results_text.setText("Ready to test.")
         layout.addWidget(self.latency_results_text, 1) # Add stretch factor
+        layout.addWidget(self.latency_raw_output_checkbox) # Add checkbox below results
 
         # Populate combo boxes
         self._populate_latency_combos()
@@ -1318,6 +1813,19 @@ class JackConnectionManager(QMainWindow):
             index = self.latency_output_combo.findData(self.latency_selected_output_alias)
             if index != -1:
                 self.latency_output_combo.setCurrentIndex(index)
+
+        # --- Set Output Combo Width to Match Input Combo Width ---
+        # Use sizeHint after population for a better estimate of required width.
+        input_width = self.latency_input_combo.sizeHint().width()
+        if input_width > 0: # Ensure valid width before setting
+             # print(f"Setting latency_output_combo minimum width to: {input_width}") # Optional debug print
+             self.latency_output_combo.setMinimumWidth(input_width)
+             # Ensure the output combo can expand horizontally if needed
+             output_policy = self.latency_output_combo.sizePolicy()
+             # Using Expanding ensures it takes *at least* the input width, and can grow if layout dictates
+             output_policy.setHorizontalPolicy(QSizePolicy.Policy.Expanding)
+             self.latency_output_combo.setSizePolicy(output_policy)
+        # --- End Width Setting ---
 
         # Unblock signals
         self.latency_input_combo.blockSignals(False)
@@ -1422,16 +1930,26 @@ class JackConnectionManager(QMainWindow):
 
 
         middle_layout = QVBoxLayout()
-        button_layout = QHBoxLayout()
+        button_layout = QHBoxLayout() # Top buttons: Connect, Disconnect, Presets
         connect_button = QPushButton('Connect')
+        connect_button.setToolTip("Connect selected ports (C)") # Add tooltip
         disconnect_button = QPushButton('Disconnect')
+        disconnect_button.setToolTip("Disconnect selected ports (D or Delete)") # Add tooltip
+        # Presets button moved here from bottom layout
+        presets_button = QPushButton("Presets")
+        presets_button.setStyleSheet(self.button_stylesheet())
+        presets_button.clicked.connect(self._show_preset_menu)
+        # Refresh button created but not added here (moved to bottom)
         refresh_button = QPushButton('Refresh')
-        for button in [connect_button, disconnect_button, refresh_button]:
-            button.setStyleSheet(self.button_stylesheet())
 
+        # Apply styles
+        for button in [connect_button, disconnect_button, presets_button, refresh_button]:
+             button.setStyleSheet(self.button_stylesheet())
+
+        # Add buttons to top layout
         button_layout.addWidget(connect_button)
         button_layout.addWidget(disconnect_button)
-        button_layout.addWidget(refresh_button)
+        button_layout.addWidget(presets_button) # Add presets button to top layout
         middle_layout.addLayout(button_layout)
         middle_layout.addWidget(connection_view)
 
@@ -1453,7 +1971,8 @@ class JackConnectionManager(QMainWindow):
             self.connection_view = connection_view
             self.connect_button = connect_button
             self.disconnect_button = disconnect_button
-            self.refresh_button = refresh_button
+            self.refresh_button = refresh_button # Keep assignment for the bottom layout logic
+            self.presets_button = presets_button # Assign presets button for audio tab
             # References (self.input_filter_edit, self.output_filter_edit) created in __init__
 
             input_tree.itemClicked.connect(self.on_input_clicked)
@@ -1477,6 +1996,8 @@ class JackConnectionManager(QMainWindow):
             self.midi_connection_view = connection_view
             self.midi_connect_button = connect_button
             self.midi_disconnect_button = disconnect_button
+            self.midi_refresh_button = refresh_button # Keep assignment for the bottom layout logic
+            self.midi_presets_button = presets_button # Assign presets button for midi tab
             # References (self.midi_input_filter_edit, self.midi_output_filter_edit) created in __init__
 
             input_tree.itemClicked.connect(self.on_midi_input_clicked)
@@ -1486,6 +2007,9 @@ class JackConnectionManager(QMainWindow):
             refresh_button.clicked.connect(self.refresh_ports)
             # Filter signals are connected in the 'audio' block to the shared handler
 
+        # Apply initial font size to the created trees
+        self._apply_port_list_font_size()
+
     def setup_bottom_layout(self, main_layout):
         bottom_layout = QHBoxLayout()
 
@@ -1494,18 +2018,25 @@ class JackConnectionManager(QMainWindow):
         # Load auto refresh state from config
         auto_refresh_enabled = self.config_manager.get_bool('auto_refresh_enabled', True)
         self.auto_refresh_checkbox.setChecked(auto_refresh_enabled)
-
+        self.auto_refresh_checkbox.setToolTip("Toggle automatic refreshing of ports and connections (Alt+R)") # Add tooltip
         # Collapse All toggle
         self.collapse_all_checkbox = QCheckBox('Collapse All')
         # Load collapse all state from config
         collapse_all_enabled = self.config_manager.get_bool('collapse_all_enabled', False)
         self.collapse_all_checkbox.setChecked(collapse_all_enabled)
+        self.collapse_all_checkbox.setToolTip("Toggle collapse state for all groups (Alt+C)") # Add tooltip
         self.collapse_all_checkbox.stateChanged.connect(self.toggle_collapse_all)
 
         # Undo/Redo buttons
         self.undo_button = QPushButton('Undo')
+        self.undo_button.setToolTip("Undo last action (Ctrl+Z)") # Add tooltip
         self.redo_button = QPushButton('Redo')
-        button_size = self.connect_button.sizeHint()
+        self.redo_button.setToolTip("Redo last action (Ctrl+Y or Ctrl+Shift+Z)") # Add tooltip
+        # Try to get size hint from connect button if it exists, otherwise use default
+        try:
+            button_size = self.connect_button.sizeHint()
+        except AttributeError:
+            button_size = QSize(75, 25) # Default size if connect_button not yet created
         self.undo_button.setFixedSize(button_size)
         self.redo_button.setFixedSize(button_size)
 
@@ -1532,11 +2063,51 @@ class JackConnectionManager(QMainWindow):
             bottom_layout.addWidget(self.output_filter_edit) # Add output filter to the far left
 
         bottom_layout.addStretch(1) # Push central controls away from left filter
-        bottom_layout.addWidget(self.auto_refresh_checkbox)
+
+        # Presets button moved to setup_port_tab
+
+        # Refresh button (moved from top layout) - One button for both tabs
+        self.bottom_refresh_button = QPushButton('Refresh')
+        self.bottom_refresh_button.setToolTip("Refresh port list (R)") # Add tooltip
+        self.bottom_refresh_button.setStyleSheet(self.button_stylesheet())
+        # refresh_ports already handles audio/midi based on self.port_type
+        self.bottom_refresh_button.clicked.connect(self.refresh_ports)
+
+        # Add widgets in the new order: Collapse All, Auto Refresh, Refresh, Undo, Redo
+        # --- Untangle Cycle Button ---
+        self.untangle_button = QPushButton() # Text set by _update_untangle_button_text
+        self.untangle_button.setStyleSheet(self.button_stylesheet())
+        self.untangle_button.setToolTip("Untangle cables: Default -> A -> B (Alt+U)")
+        # Connect clicked signal instead of stateChanged
+        self.untangle_button.clicked.connect(self.toggle_untangle_sort)
+        self._update_untangle_button_text() # Set initial text based on loaded mode
+        # --- End Untangle Cycle Button ---
+
         bottom_layout.addWidget(self.collapse_all_checkbox)
+        bottom_layout.addWidget(self.auto_refresh_checkbox)
+        bottom_layout.addWidget(self.bottom_refresh_button) # Add refresh button here
+        bottom_layout.addWidget(self.untangle_button)
         bottom_layout.addWidget(self.undo_button)
         bottom_layout.addWidget(self.redo_button)
-        bottom_layout.addStretch(1) # Push input filter away from central controls
+        bottom_layout.addStretch(1) # Push zoom and input filter away from central controls
+
+        # --- Add Zoom Buttons ---
+        self.zoom_in_button = QPushButton('+')
+        self.zoom_in_button.setToolTip("Increase port list font size (Ctrl++)")
+        self.zoom_in_button.setStyleSheet(self.button_stylesheet())
+        zoom_button_size = QSize(25, 25) # Define smaller, square size
+        self.zoom_in_button.setFixedSize(zoom_button_size)
+        self.zoom_in_button.clicked.connect(self.increase_font_size)
+
+        self.zoom_out_button = QPushButton('-')
+        self.zoom_out_button.setToolTip("Decrease port list font size (Ctrl+-) ")
+        self.zoom_out_button.setStyleSheet(self.button_stylesheet())
+        self.zoom_out_button.setFixedSize(zoom_button_size)
+        self.zoom_out_button.clicked.connect(self.decrease_font_size)
+
+        bottom_layout.addWidget(self.zoom_out_button)
+        bottom_layout.addWidget(self.zoom_in_button)
+        # --- End Zoom Buttons ---
 
         if hasattr(self, 'input_filter_edit'):
             self.input_filter_edit.setStyleSheet(filter_style)
@@ -1556,13 +2127,14 @@ class JackConnectionManager(QMainWindow):
         # Initialize visibility based on current tab
         # This ensures controls are hidden if we start directly on pw-top tab
         current_tab = self.tab_widget.currentIndex() if hasattr(self, 'tab_widget') else 0
-        self.show_bottom_controls(current_tab < 2)
-
+        self.show_bottom_controls(current_tab < 2) # Preset button visibility handled here too
         # Start visualization timers if auto-refresh is enabled in config
         if auto_refresh_enabled:
+            # Ensure 8-space indentation for lines inside 'if'
             self.connection_view.start_refresh_timer(self.refresh_visualizations)
             self.midi_connection_view.start_refresh_timer(self.refresh_visualizations)
 
+        # Ensure 4-space indentation for the print statement (same level as 'if')
     # Add new method to apply collapse state to all trees
     def apply_collapse_state_to_all_trees(self):
         """Apply the current collapse state to all port trees"""
@@ -1619,23 +2191,37 @@ class JackConnectionManager(QMainWindow):
         elif index == 3: # jack_delay tab
             # No specific process to start here, just hide controls
             self.show_bottom_controls(False) # Hide controls
+        
+        # Update the refresh interval based on the new tab and current focus state
+        self._update_refresh_timer_interval()
 
     def show_bottom_controls(self, visible):
         """Show or hide bottom controls based on active tab"""
+        # Presets button is now part of the port tab layout, not the bottom layout.
+        # Its visibility is handled by the tab switching itself.
         if hasattr(self, 'auto_refresh_checkbox'):
             self.auto_refresh_checkbox.setVisible(visible)
+            # Use the new button name here
+            if hasattr(self, 'untangle_button'): # Add check for safety
+                self.untangle_button.setVisible(visible)
         if hasattr(self, 'collapse_all_checkbox'):
             self.collapse_all_checkbox.setVisible(visible)
+        # Show/hide the new bottom refresh button
+        if hasattr(self, 'bottom_refresh_button'):
+            self.bottom_refresh_button.setVisible(visible)
         if hasattr(self, 'undo_button'):
             self.undo_button.setVisible(visible)
         if hasattr(self, 'redo_button'):
             self.redo_button.setVisible(visible)
-        # Also show/hide the filter edits
+        # Also show/hide the filter edits and zoom buttons
         if hasattr(self, 'output_filter_edit'):
             self.output_filter_edit.setVisible(visible)
         if hasattr(self, 'input_filter_edit'):
             self.input_filter_edit.setVisible(visible)
-        # Removed references to non-existent MIDI filter edits
+        if hasattr(self, 'zoom_in_button'):
+            self.zoom_in_button.setVisible(visible)
+        if hasattr(self, 'zoom_out_button'):
+            self.zoom_out_button.setVisible(visible)
 
 
     def _handle_port_registration(self, port, register: bool):
@@ -1690,7 +2276,7 @@ class JackConnectionManager(QMainWindow):
             # ensuring both jack_delay ports might be ready.
             QTimer.singleShot(50, self._attempt_latency_auto_connection) # 50ms delay
 
-        self.refresh_ports()
+        self.refresh_ports(refresh_all=True)
 
 
     def _on_port_unregistered(self, port_name: str, is_input: bool):
@@ -1698,16 +2284,22 @@ class JackConnectionManager(QMainWindow):
         if not self.callbacks_enabled:
             return
         
-        self.refresh_ports()
+        self.refresh_ports(refresh_all=True)
 
     def toggle_auto_refresh(self, state):
         is_checked = int(state) == 2  # Qt.CheckState.Checked equals 2
         self.callbacks_enabled = is_checked
 
-        # Start or stop visualization timers based on state
+        # Start/stop and adjust visualization timers based on state and focus
         if is_checked:
-            self.connection_view.start_refresh_timer(self.refresh_visualizations)
-            self.midi_connection_view.start_refresh_timer(self.refresh_visualizations)
+            # Ensure timers are started (start_refresh_timer handles multiple calls safely)
+            # The default interval in start_refresh_timer should be 1ms
+            # print("DEBUG: Starting timers in toggle_auto_refresh") # Add log
+            self.connection_view.start_refresh_timer(self.refresh_visualizations, interval=1)
+            self.midi_connection_view.start_refresh_timer(self.refresh_visualizations, interval=1)
+            # Set the correct interval based on current focus
+            # print("DEBUG: Calling _update_refresh_timer_interval from toggle_auto_refresh") # Add log
+            self._update_refresh_timer_interval()
         else:
             self.connection_view.stop_refresh_timer()
             self.midi_connection_view.stop_refresh_timer()
@@ -1715,19 +2307,450 @@ class JackConnectionManager(QMainWindow):
         # Save state to config
         self.config_manager.set_bool('auto_refresh_enabled', is_checked)
 
+    # --- Focus Handling for Timer Interval ---
+    def _update_refresh_timer_interval(self):
+        """Adjusts the visualization refresh timer interval based on focus and active tab."""
+        if self.callbacks_enabled:
+            if not self.is_focused:
+                interval = 100  # Not focused, always 100ms
+            else:
+                # Window is focused, check the active tab
+                current_index = self.tab_widget.currentIndex()
+                if current_index == 0 or current_index == 1:  # Audio or MIDI tab
+                    interval = 5
+                elif current_index == 2 or current_index == 3:  # pw-top or Latency Test tab
+                    interval = 100
+                else:
+                    # Fallback for any other potential tabs (or if tab widget doesn't exist yet)
+                    # Using the original focused interval as a sensible default
+                    interval = 100
+
+            # print(f"DEBUG: Setting refresh interval to {interval}ms (Focused: {self.is_focused}, Tab: {self.tab_widget.currentIndex()})") # Optional debug log
+            try:
+                # Check if timers exist and are active before setting interval
+                if hasattr(self.connection_view, 'refresh_timer') and self.connection_view.refresh_timer.isActive():
+                    self.connection_view.refresh_timer.setInterval(interval)
+                if hasattr(self.midi_connection_view, 'refresh_timer') and self.midi_connection_view.refresh_timer.isActive():
+                    self.midi_connection_view.refresh_timer.setInterval(interval)
+            except AttributeError as e:
+                 print(f"Warning: Could not access refresh_timer: {e}") # Handle cases where views might not be fully initialized
+
+    def changeEvent(self, event):
+        """Handle window state changes, specifically activation."""
+        super().changeEvent(event) # Call base implementation first
+        if event.type() == event.Type.ActivationChange:
+            self.is_focused = self.isActiveWindow()
+            # print(f"DEBUG: ActivationChange detected - isActiveWindow: {self.is_focused}") # Add log
+            self._update_refresh_timer_interval()
+    # --- End Focus Handling --- (Replaced focusIn/OutEvent with changeEvent)
+
+    # --- Add Preset Handling Methods ---
+
+    def _get_current_connections(self):
+        """Gets the current state of all JACK audio and MIDI connections."""
+        all_connections = []
+        try:
+            # Get all output ports (both audio and MIDI)
+            output_ports = self.client.get_ports(is_output=True)
+            for output_port in output_ports:
+                try:
+                    # Check if port still exists before getting connections
+                    if not any(p.name == output_port.name for p in self.client.get_ports(is_output=True)):
+                        continue
+                    connected_inputs = self.client.get_all_connections(output_port)
+                    port_type = "midi" if output_port.is_midi else "audio"
+                    for input_port in connected_inputs:
+                        # Ensure the connected port is also of the same type (should always be true)
+                        if input_port.is_midi == output_port.is_midi:
+                             all_connections.append({
+                                 "output": output_port.name,
+                                 "input": input_port.name,
+                                 "type": port_type
+                             })
+                except jack.JackError as conn_err:
+                    # Ignore errors getting connections for a single port (it might have disappeared)
+                    print(f"Warning: Could not get connections for {output_port.name}: {conn_err}")
+                    continue
+        except jack.JackError as e:
+            print(f"Error getting current connections: {e}")
+        return all_connections
+
+    def _show_preset_menu(self):
+        """Creates and shows the preset management menu."""
+        menu = QMenu(self)
+        preset_names = self.preset_manager.get_preset_names()
+
+        # --- Save Section ---
+        # Use a temporary attribute to hold the line edit for the save action
+        self._preset_menu_name_edit = QLineEdit()
+        self._preset_menu_name_edit.setPlaceholderText("Enter New Preset Name...")
+        self._preset_menu_name_edit.returnPressed.connect(self._save_current_preset_from_menu) # Connect Enter key
+        self._preset_menu_name_edit.setMinimumWidth(200) # Give it some space
+        # Apply similar styling as filter edits
+        filter_style = f"""
+            QLineEdit {{
+                background-color: {self.background_color.name()};
+                color: {self.text_color.name()};
+                border: 1px solid {self.text_color.name()};
+                padding: 2px;
+                border-radius: 3px;
+            }}
+        """
+        self._preset_menu_name_edit.setStyleSheet(filter_style)
+
+        name_action = QWidgetAction(menu)
+        name_action.setDefaultWidget(self._preset_menu_name_edit)
+        menu.addAction(name_action)
+
+        save_action = QAction("Save Current as New Preset", menu)
+        save_action.triggered.connect(self._save_current_preset_from_menu)
+        menu.addAction(save_action)
+
+        # --- Add "Save" action for currently loaded preset ---
+        save_loaded_action = QAction("Save", menu)
+        save_loaded_action.setToolTip(f"Save current connections over loaded preset '{self.current_preset_name}'")
+        # Enable only if a preset is currently loaded
+        save_loaded_action.setEnabled(bool(self.current_preset_name))
+        save_loaded_action.triggered.connect(self._save_current_loaded_preset)
+        menu.addAction(save_loaded_action)
+        # --- End Add "Save" action ---
+
+        menu.addSeparator()
+
+        # --- Load Section ---
+        load_menu = menu.addMenu("Load Preset") # Create menu even if no presets exist
+
+        # Add "Default" option at the top
+        default_action = QAction("Default", load_menu)
+        default_action.triggered.connect(self._handle_default_preset_action)
+        load_menu.addAction(default_action)
+        load_menu.addSeparator() # Add separator after "Default"
+
+        if preset_names:
+            for name in preset_names:
+                load_action = QAction(name, load_menu)
+                # Highlight if this is the currently active preset
+                # Compare with self.current_preset_name (initialized from config)
+                if name == self.current_preset_name:
+                    font = load_action.font()
+                    font.setBold(True)
+                    load_action.setFont(font)
+                # Use lambda to capture the correct name and call the new handler
+                load_action.triggered.connect(lambda checked=False, n=name: self._handle_gui_preset_load(n))
+                load_menu.addAction(load_action)
+        else:
+            no_load_action = QAction("No Saved Presets", menu)
+            no_load_action.setEnabled(False)
+            menu.addAction(no_load_action)
+
+        # --- Delete Section ---
+        if preset_names:
+            menu.addSeparator()
+            delete_menu = menu.addMenu("Delete Preset")
+            for name in preset_names:
+                delete_action = QAction(name, delete_menu)
+                # Use lambda to capture the correct name for the slot
+                delete_action.triggered.connect(lambda checked=False, n=name: self._delete_selected_preset(n))
+                delete_menu.addAction(delete_action)
+
+        # --- Startup Preset Section ---
+        menu.addSeparator()
+        startup_menu = menu.addMenu("Preset to load at (auto)start")
+        startup_group = QActionGroup(startup_menu) # Use QActionGroup for exclusivity
+        startup_group.setExclusive(True)
+
+        # Add "None" option
+        none_action = QAction("None", startup_menu)
+        none_action.setCheckable(True)
+        none_action.setChecked(not self.startup_preset_name or self.startup_preset_name == 'None')
+        none_action.triggered.connect(lambda checked=False: self._set_startup_preset(None))
+        startup_menu.addAction(none_action)
+        startup_group.addAction(none_action) # Add to group
+        startup_menu.addSeparator() # Add spacer after 'None'
+
+        # Add existing presets
+        for name in preset_names:
+            startup_action = QAction(name, startup_menu)
+            startup_action.setCheckable(True)
+            startup_action.setChecked(name == self.startup_preset_name)
+            # Use lambda to capture the correct name
+            startup_action.triggered.connect(lambda checked=False, n=name: self._set_startup_preset(n))
+            startup_menu.addAction(startup_action)
+            startup_group.addAction(startup_action) # Add to group
+
+        # Show the menu at the presets button position
+        presets_button_pos = self.presets_button.mapToGlobal(QPoint(0, self.presets_button.height()))
+        menu.exec(presets_button_pos)
+
+        # Clean up reference to the line edit after the menu is closed
+        del self._preset_menu_name_edit
+
+
+    def _save_current_preset_from_menu(self):
+        """Saves the current connections using the name from the menu's line edit."""
+        # Retrieve name from the temporary attribute holding the QLineEdit
+        preset_name = self._preset_menu_name_edit.text().strip()
+        if not preset_name:
+            QMessageBox.warning(self, "Save Preset", "Enter a name for the preset.")
+            return
+
+        current_connections = self._get_current_connections()
+        if not current_connections:
+             QMessageBox.information(self, "Save Preset", "No connections to save.")
+             return
+
+        if self.preset_manager.save_preset(preset_name, current_connections, self): # Pass self as parent_widget
+            print(f"Preset '{preset_name}' saved.")
+            show_timed_messagebox(self, QMessageBox.Icon.Information, "Preset Saved", f"Preset '{preset_name}' saved successfully.")
+   #     else:
+    #        QMessageBox.critical(self, "Save Preset", f"Failed to save preset '{preset_name}'.")
+
+
+    def _set_startup_preset(self, name):
+       """Sets the selected preset name as the startup preset in the config."""
+       print(f"Setting startup preset to: {name}")
+       self.startup_preset_name = name # Update internal state
+       # Save the actual preset name, or None (which ConfigManager saves as empty string)
+       self.config_manager.set_str('startup_preset', name)
+       # No need to update menu check state here as it's closed
+
+    def _load_selected_preset(self, name, is_startup=False):
+        """Loads the connections from the selected preset.
+        Updates self.current_preset_name and returns True on success, False otherwise.
+        is_startup flag prevents showing success message on startup load."""
+        print(f"Loading preset: {name}")
+        preset_connections = self.preset_manager.get_preset(name)
+        if preset_connections is None:
+            if not is_startup: # Only show message box in GUI mode
+                QMessageBox.critical(self, "Load Preset", f"Could not find preset '{name}'.")
+            else:
+                print(f"Error: Could not find preset '{name}'.")
+            self.current_preset_name = None # Clear preset name on failure
+            return False # Indicate failure
+
+        # 1. Get current connections
+        current_connections = self._get_current_connections()
+
+        # 2. Disconnect all current connections
+        print("Disconnecting existing connections...")
+        connections_to_restore_on_error = [] # Keep track if disconnect fails mid-way
+        try:
+            for conn in current_connections:
+                conn_type = conn.get("type", "audio") # Default to audio if type missing
+                output_name = conn.get("output")
+                input_name = conn.get("input")
+                if output_name and input_name:
+                    connections_to_restore_on_error.append(conn) # Add before attempting disconnect
+                    print(f"  Disconnecting {output_name} -> {input_name} ({conn_type})")
+                    if conn_type == "midi":
+                        self.client.disconnect(output_name, input_name)
+                    else:
+                        self.client.disconnect(output_name, input_name)
+                    # Remove from restore list on success
+                    connections_to_restore_on_error.pop()
+        except jack.JackError as e:
+            print(f"Error during disconnection phase: {e}. Attempting to restore...")
+            # Attempt to restore connections that were successfully disconnected before the error
+            for restore_conn in connections_to_restore_on_error:
+                try:
+                    self.client.connect(restore_conn["output"], restore_conn["input"])
+                except jack.JackError: pass # Ignore restore errors
+            if not is_startup:
+                QMessageBox.warning(self, "Load Preset Error", f"An error occurred disconnecting existing connections: {e}\nPreset loading aborted.")
+            else:
+                print(f"Error during disconnection phase: {e}. Preset loading aborted.")
+            self.refresh_ports() # Refresh UI to show potentially restored state
+            self.current_preset_name = None # Clear preset name on failure
+            return False # Indicate failure
+        except Exception as e: # Catch other potential errors
+            print(f"Unexpected error during disconnection: {e}")
+            if not is_startup:
+                QMessageBox.critical(self, "Load Preset Error", f"An unexpected error occurred during disconnection: {e}\nPreset loading aborted.")
+            else:
+                print(f"Unexpected error during disconnection: {e}. Preset loading aborted.")
+            self.refresh_ports()
+            self.current_preset_name = None # Clear preset name on failure
+            return False # Indicate failure
+
+        # 3. Connect preset connections
+        print(f"Connecting preset '{name}' connections...")
+        connections_made = []
+        errors_occurred = False
+        try:
+            for conn in preset_connections:
+                conn_type = conn.get("type", "audio")
+                output_name = conn.get("output")
+                input_name = conn.get("input")
+                if output_name and input_name:
+                    try:
+                        print(f"  Connecting {output_name} -> {input_name} ({conn_type})")
+                        # Check if ports exist before connecting
+                        # Note: This adds overhead but prevents JackErrors for non-existent ports
+                        out_port_exists = any(p.name == output_name for p in self.client.get_ports(is_output=True, is_midi=(conn_type == "midi")))
+                        in_port_exists = any(p.name == input_name for p in self.client.get_ports(is_input=True, is_midi=(conn_type == "midi")))
+
+                        if out_port_exists and in_port_exists:
+                            if conn_type == "midi":
+                                self.client.connect(output_name, input_name)
+                            else:
+                                self.client.connect(output_name, input_name)
+                            connections_made.append(conn) # Track successful connections
+                        else:
+                            print(f"    Skipping connection: Port(s) not found (Output: {out_port_exists}, Input: {in_port_exists})")
+                            errors_occurred = True # Flag that some connections were skipped
+
+                    except jack.JackError as e:
+                        print(f"    Error connecting {output_name} -> {input_name}: {e}")
+                        errors_occurred = True # Flag that errors occurred
+                        # Continue to the next connection (original behavior)
+                    except Exception as e: # Catch other potential errors
+                        print(f"    Unexpected error connecting {output_name} -> {input_name}: {e}")
+                        errors_occurred = True
+                        # Continue to the next connection
+
+        except Exception as e: # Catch broader errors during the connection loop setup itself (e.g., iterating preset_connections)
+            print(f"Unexpected error during connection phase setup: {e}")
+            if not is_startup:
+                QMessageBox.critical(self, "Load Preset Error", f"An unexpected error occurred during connection phase: {e}\nPreset loading failed.")
+            else:
+                print(f"Unexpected error during connection phase: {e}. Preset loading failed.")
+            self.refresh_ports()
+            self.current_preset_name = None # Clear preset name on failure
+            return False # Indicate failure - This was a setup error, not a connection error
+
+        # 4. Refresh UI and update state
+        print("Preset load complete. Refreshing UI.")
+        self.current_preset_name = name # Set the current preset name on success/partial success
+        self.refresh_ports() # This updates visuals and button states
+
+        if errors_occurred:
+             # Only show message if not loading at startup
+             if not is_startup:
+                  QMessageBox.information(self, "Load Preset", f"Preset '{name}' loaded, but some connections could not be made (ports might be missing).")
+        else:
+             # Only show message if not loading at startup
+             if not is_startup:
+                  show_timed_messagebox(self, QMessageBox.Icon.Information, "Load Preset", f"Preset '{name}' loaded successfully.")
+
+        return True # Indicate success
+
+    def _delete_selected_preset(self, name):
+        """Deletes the selected preset after confirmation."""
+        reply = QMessageBox.question(self, 'Delete Preset',
+                                     f"Are you sure you want to delete the preset '{name}'?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            if self.preset_manager.delete_preset(name):
+                print(f"Preset '{name}' deleted.")
+                show_timed_messagebox(self, QMessageBox.Icon.Information, "Preset Deleted", f"Preset '{name}' deleted.")
+            else:
+                QMessageBox.warning(self, "Delete Preset", f"Could not find or delete preset '{name}'.")
+
+    # --- Add New Method ---
+    def _handle_gui_preset_load(self, name):
+        """Handles loading a preset via the GUI menu click."""
+        success = self._load_selected_preset(name) # This updates self.current_preset_name
+        if success:
+            # Save the newly loaded preset name to config for the next run
+            self.config_manager.set_str('active_preset', name)
+            print(f"GUI Load: Set active_preset in config to '{name}'")
+        else:
+            # If loading failed, _load_selected_preset set self.current_preset_name to None.
+            # Clear the active_preset in config as well.
+            self.config_manager.set_str('active_preset', None)
+            print("GUI Load: Cleared active_preset in config due to load failure.")
+        # No need to manually update menu bolding here, it happens next time menu is opened.
+    # --- End New Method ---
+
+    # --- End Preset Handling Methods ---
+
+    def _handle_default_preset_action(self):
+        """Handles the 'Default' preset action: disconnects all connections, then restarts the session manager."""
+        reply = QMessageBox.question(self, 'Confirm Reset',
+                                     "This will disconnect all current connections and then restart WirePlumber"
+                                     "to restore default connections.\n\n"
+                                     "Are you sure you want to proceed?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No) # Default to No
+
+        if reply == QMessageBox.StandardButton.Yes:
+            print("User confirmed default connection reset.")
+
+            # --- Step 1: Disconnect All Connections ---
+            print("Step 1: Disconnecting all existing JACK connections...")
+            current_connections = self._get_current_connections()
+            disconnect_errors = []
+            disconnected_count = 0
+
+            if current_connections:
+                for conn in current_connections:
+                    output_name = conn.get("output")
+                    input_name = conn.get("input")
+                    if output_name and input_name:
+                        try:
+                            # print(f"  Disconnecting {output_name} -> {input_name}") # Verbose logging
+                            self.client.disconnect(output_name, input_name)
+                            disconnected_count += 1
+                        except jack.JackError as e:
+                            print(f"    Warning: Could not disconnect {output_name} -> {input_name}: {e}")
+                        except Exception as e:
+                             print(f"    Unexpected error disconnecting {output_name} -> {input_name}: {e}")
+                             disconnect_errors.append(f"{output_name} -> {input_name}: {e}")
+                print(f"Step 1: Disconnected {disconnected_count} connections.")
+                if disconnect_errors:
+                    print(f"Step 1: Encountered unexpected errors during disconnection: {disconnect_errors}")
+            else:
+                print("Step 1: No active JACK connections found to disconnect.")
+
+            # --- Step 2: Restart Session Manager ---
+            print("Step 2: Restarting PipeWire session manager...")
+            service_name = "wireplumber.service" # Default to WirePlumber
+            command = []
+            if self.flatpak_env:
+                print(f"  Running in Flatpak environment. Using flatpak-spawn to restart {service_name}.")
+                command = ["flatpak-spawn", "--host", "systemctl", "restart", "--user", service_name]
+            else:
+                print(f"  Running outside Flatpak environment. Using systemctl to restart {service_name}.")
+                command = ["systemctl", "restart", "--user", service_name]
+
+            print(f"  Executing command: {' '.join(command)}")
+            success = QProcess.startDetached(command[0], command[1:])
+
+            # --- Finalization ---
+            # Clear the active preset regardless of restart success
+            self.config_manager.set_str('active_preset', None)
+            self.current_preset_name = None
+            print("Cleared active_preset in config after selecting 'Default'.")
+
+            if success:
+                print("Step 2: Session manager restart command initiated successfully.")
+                show_timed_messagebox(self, QMessageBox.Icon.Information, "Resetting Connections",
+                                      f"Disconnected {disconnected_count} connections.\nSession manager ({service_name}) restart initiated.", 2500)
+                # Trigger a refresh after a delay to allow session manager to restart and apply defaults
+                QTimer.singleShot(2000, self.refresh_ports) # Increased delay slightly
+            else:
+                error_message = f"Failed to execute session manager restart command: {' '.join(command)}\n\n" \
+                                f"Connections were disconnected, but defaults may not be restored.\n" \
+                                f"If you are not using WirePlumber, you might need to manually restart your session manager (e.g., pipewire-media-session.service)."
+                print(error_message)
+                QMessageBox.critical(self, "Reset Error", error_message)
+                # Refresh immediately to show the disconnected state
+                self.refresh_ports()
     def is_dark_mode(self):
         palette = QApplication.palette()
         return palette.window().color().lightness() < 128
 
     def setup_colors(self):
         if self.dark_mode:
-            self.background_color = QColor(53, 53, 53)
+            self.background_color = QColor(24, 26, 33) # Made background darker
             self.text_color = QColor(255, 255, 255)
-            self.highlight_color = QColor(42, 130, 218)
+            self.highlight_color = QColor(20, 62, 104)
             self.button_color = QColor(68, 68, 68)
             self.connection_color = QColor(0, 150, 255)  # Brighter blue for dark mode
             self.auto_highlight_color = QColor(255, 200, 0)  # Brighter orange
-            self.drag_highlight_color = QColor(100, 100, 100) # New color for drag highlight
+            self.drag_highlight_color = QColor(41, 61, 90) # New color for drag highlight
         else:
             self.background_color = QColor(255, 255, 255)
             self.text_color = QColor(0, 0, 0)
@@ -1739,9 +2762,30 @@ class JackConnectionManager(QMainWindow):
 
 
     def list_stylesheet(self):
+        highlight_bg = self.highlight_color.name()
+        # Use white text for dark mode highlight, black for light mode highlight
+        selected_text_color = "#ffffff" if self.dark_mode else "#000000"
+
         return f"""
-            QListWidget {{ background-color: {self.background_color.name()}; color: {self.text_color.name()}; }}
-            QListWidget::item:selected {{ background-color: {self.highlight_color.name()}; color: {self.text_color.name()}; }}
+            QListWidget {{
+                background-color: {self.background_color.name()};
+                color: {self.text_color.name()};
+            }}
+            QListWidget::item:selected {{
+                background-color: {highlight_bg};
+                color: {selected_text_color}; /* Ensure text is visible */
+            }}
+            QTreeView {{
+                background-color: {self.background_color.name()};
+                color: {self.text_color.name()};
+                /* Add other base styles like border if needed */
+            }}
+            QTreeView::item:selected {{
+                background-color: {highlight_bg};
+                color: {selected_text_color}; /* Ensure text is visible */
+            }}
+            /* Optional: Define hover style if needed */
+            /* QTreeView::item:hover {{ ... }} */
         """
 
     def button_stylesheet(self):
@@ -1789,16 +2833,17 @@ class JackConnectionManager(QMainWindow):
         if item_to_select and not item_to_select.isHidden():
             tree_widget.setCurrentItem(item_to_select)
 
-    def refresh_ports(self):
-        # 1. Determine current context (trees, filters, type)
-        if self.port_type == 'audio':
+    def _refresh_single_port_type(self, port_type_to_refresh):
+        """Helper method to refresh ports for a specific type (audio or midi)."""
+        # 1. Determine context based on port_type_to_refresh
+        if port_type_to_refresh == 'audio':
             input_tree = self.input_tree
             output_tree = self.output_tree
             update_visuals = self.update_connections
             clear_highlights = self.clear_highlights
             update_buttons = self.update_connection_buttons
             is_midi = False
-        elif self.port_type == 'midi':
+        elif port_type_to_refresh == 'midi':
             input_tree = self.midi_input_tree
             output_tree = self.midi_output_tree
             update_visuals = self.update_midi_connections
@@ -1806,39 +2851,44 @@ class JackConnectionManager(QMainWindow):
             update_buttons = self.update_midi_connection_buttons
             is_midi = True
         else:
+            print(f"Warning: Invalid port_type '{port_type_to_refresh}' passed to _refresh_single_port_type")
             return # Should not happen
 
-        # Use shared filter edits
+        # Use shared filter edits (assuming they apply to both types or are handled correctly)
         current_input_filter = self.input_filter_edit.text() if hasattr(self, 'input_filter_edit') else ""
         current_output_filter = self.output_filter_edit.text() if hasattr(self, 'output_filter_edit') else ""
 
-        # 2. Save current selection (port or group)
+        # 2. Save current selection and group order for this type
         selected_input_info = self._get_selected_item_info(input_tree)
         selected_output_info = self._get_selected_item_info(output_tree)
+        previous_input_group_order = input_tree.get_current_group_order()
+        previous_output_group_order = output_tree.get_current_group_order()
 
-        # 3. Clear and repopulate trees
+        # 3. Clear visual tree for this type
         input_tree.clear()
         output_tree.clear()
-        input_ports, output_ports = self._get_ports(is_midi=is_midi)
-        for port in input_ports:
-            input_tree.addPort(port)
-        for port in output_ports:
-            output_tree.addPort(port)
 
-        # 4. Re-apply filter
+        # 4. Get new port lists for this type
+        input_ports, output_ports = self._get_ports(is_midi=is_midi)
+
+        # 5. Repopulate trees for this type
+        input_tree.populate_tree(input_ports, previous_input_group_order)
+        output_tree.populate_tree(output_ports, previous_output_group_order)
+
+        # 6. Re-apply filter for this type
         self.filter_ports(input_tree, current_input_filter)
         self.filter_ports(output_tree, current_output_filter)
 
-        # 5. Restore selection
+        # 7. Restore selection for this type
         self._restore_selection(input_tree, selected_input_info)
         self._restore_selection(output_tree, selected_output_info)
 
-        # 6. Update visuals and button states
+        # 8. Update visuals and button states for this type
         update_visuals()
         clear_highlights() # Clear old highlights before applying new ones
         update_buttons()
 
-        # 7. Re-apply highlights based on the *restored* selection
+        # 9. Re-apply highlights based on the *restored* selection for this type
         restored_input_item = input_tree.currentItem()
         restored_output_item = output_tree.currentItem()
 
@@ -1846,15 +2896,14 @@ class JackConnectionManager(QMainWindow):
         if restored_input_item:
             if restored_input_item.childCount() == 0: # Port
                  port_name = restored_input_item.data(0, Qt.ItemDataRole.UserRole)
-                 self._highlight_tree_item(input_tree, port_name) # Highlight selected port
-            # No specific highlight for the selected group itself, only connected ones
+                 if port_name: # Check if port_name is valid
+                     self._highlight_tree_item(input_tree, port_name) # Highlight selected port
 
         if restored_output_item:
              if restored_output_item.childCount() == 0: # Port
                  port_name = restored_output_item.data(0, Qt.ItemDataRole.UserRole)
-                 self._highlight_tree_item(output_tree, port_name) # Highlight selected port
-             # No specific highlight for the selected group itself, only connected ones
-
+                 if port_name: # Check if port_name is valid
+                     self._highlight_tree_item(output_tree, port_name) # Highlight selected port
 
         # Highlight connected items/groups
         if restored_input_item:
@@ -1865,7 +2914,6 @@ class JackConnectionManager(QMainWindow):
                 if port_name: # Ensure port_name is valid
                     self._highlight_connected_outputs_for_input(port_name, is_midi)
 
-
         if restored_output_item:
             if restored_output_item.childCount() > 0: # Group selected
                 self._highlight_connected_input_groups_for_output_group(restored_output_item, is_midi)
@@ -1874,10 +2922,32 @@ class JackConnectionManager(QMainWindow):
                 if port_name: # Ensure port_name is valid
                     self._highlight_connected_inputs_for_output(port_name, is_midi)
 
+        # 10. Maintain collapse state if needed for this type
+        # Note: apply_collapse_state_to_current_trees already checks the current self.port_type
+        # If refresh_all is True, we might need a way to apply collapse state to both,
+        # or accept that it only applies to the currently *viewed* tab's setting.
+        # Let's stick to the latter for now, as modifying collapse state for an inactive tab might be unexpected.
+        # If the currently viewed tab matches the type being refreshed, apply its collapse state.
+        if self.port_type == port_type_to_refresh:
+             if hasattr(self, 'collapse_all_checkbox') and self.collapse_all_checkbox.isChecked():
+                 self.apply_collapse_state_to_current_trees() # This method checks self.port_type internally
 
-        # 8. Maintain collapse state if needed
-        if hasattr(self, 'collapse_all_checkbox') and self.collapse_all_checkbox.isChecked():
-            self.apply_collapse_state_to_current_trees()
+
+    def refresh_ports(self, refresh_all=False):
+        """
+        Refreshes the port lists displayed in the trees.
+
+        Args:
+            refresh_all (bool): If True, refresh both audio and MIDI ports.
+                                If False, refresh only the currently active port type.
+        """
+        if refresh_all:
+            # print("DEBUG: Refreshing ALL ports (Audio and MIDI)") # Optional debug log
+            self._refresh_single_port_type('audio')
+            self._refresh_single_port_type('midi')
+        else:
+            # print(f"DEBUG: Refreshing only {self.port_type} ports") # Optional debug log
+            self._refresh_single_port_type(self.port_type)
 
     # Add a new helper method to apply collapse state only to the current tab's trees
     def apply_collapse_state_to_current_trees(self):
@@ -2844,6 +3914,36 @@ class JackConnectionManager(QMainWindow):
             # Broader error during the process
             print(f"Error checking connections: {e}")
             return False # Assume no connection on error
+    def _get_existing_connections_between(self, output_ports, input_ports):
+        """Returns a set of existing (output, input) connection tuples between the given port lists."""
+        existing_connections = set()
+        if not output_ports or not input_ports:
+            return existing_connections
+        try:
+            # Convert input_ports to a set for faster lookups
+            input_ports_set = set(input_ports)
+            for out_port in output_ports:
+                # Check connections for this output port
+                try:
+                    # Determine if MIDI based on current tab context
+                    is_midi = self.tab_widget.currentIndex() == 1
+                    # Ensure port exists before querying
+                    if not any(p.name == out_port for p in self.client.get_ports(is_output=True, is_midi=is_midi)):
+                        continue
+
+                    connections = self.client.get_all_connections(out_port)
+                    for conn in connections:
+                        # If the connected input port is in our target input set, add the tuple
+                        if conn.name in input_ports_set:
+                            existing_connections.add((out_port, conn.name))
+                except jack.JackError:
+                    continue # Ignore error for this specific output port
+            return existing_connections
+        except jack.JackError as e:
+            # Broader error during the process
+            print(f"Error getting existing connections: {e}")
+            return existing_connections # Return what we have found so far or empty set
+
 
     def _update_port_connection_buttons(self, input_tree, output_tree, connect_button, disconnect_button):
         """Update connection button states based on selected ports (handles multi-select)."""
@@ -2851,15 +3951,32 @@ class JackConnectionManager(QMainWindow):
         selected_input_ports = self._get_ports_from_selected_items(input_tree)
         selected_output_ports = self._get_ports_from_selected_items(output_tree)
 
-        # Enable connect button only if at least one port is selected in BOTH trees
-        can_connect = bool(selected_input_ports and selected_output_ports)
-        connect_button.setEnabled(can_connect)
+        ports_selected = bool(selected_input_ports and selected_output_ports)
 
-        # Enable disconnect button only if a connection exists between ANY selected output and ANY selected input
+        can_connect = False
         can_disconnect = False
-        if can_connect: # Only check for connections if we have selections in both trees
-            can_disconnect = self._are_groups_connected(selected_output_ports, selected_input_ports)
 
+        if ports_selected:
+            # 1. Determine all possible connections (cross-product)
+            possible_connections = set()
+            for out_p in selected_output_ports:
+                for in_p in selected_input_ports:
+                    possible_connections.add((out_p, in_p))
+
+            # 2. Determine existing connections between the selected ports
+            existing_connections = self._get_existing_connections_between(selected_output_ports, selected_input_ports)
+
+            # 3. Enable Connect if there are possible connections that don't already exist.
+            #    (i.e., the set of possible connections is not equal to the set of existing ones)
+            #    Also ensure there are actually possible connections to make.
+            if len(possible_connections) > 0 and possible_connections != existing_connections:
+                 can_connect = True
+
+            # 4. Enable Disconnect if there are any existing connections
+            if len(existing_connections) > 0:
+                can_disconnect = True
+
+        connect_button.setEnabled(can_connect)
         disconnect_button.setEnabled(can_disconnect)
 
 
@@ -2888,8 +4005,12 @@ class JackConnectionManager(QMainWindow):
         # self.refresh_visualizations() # Redundant call removed
 
     def filter_ports(self, tree_widget, filter_text):
-        """Filters the items in the specified tree widget based on the filter text."""
-        filter_text = filter_text.lower() # Case-insensitive filtering
+        """Filters the items in the specified tree widget based on the filter text,
+           supporting exclusion with '-' prefix."""
+        filter_text_lower = filter_text.lower()
+        terms = filter_text_lower.split()
+        include_terms = [term for term in terms if not term.startswith('-')]
+        exclude_terms = [term[1:] for term in terms if term.startswith('-') and len(term) > 1] # Remove '-'
 
         # Iterate through all top-level items (groups)
         for i in range(tree_widget.topLevelItemCount()):
@@ -2900,11 +4021,33 @@ class JackConnectionManager(QMainWindow):
             for j in range(group_item.childCount()):
                 port_item = group_item.child(j)
                 port_name = port_item.data(0, Qt.ItemDataRole.UserRole) # Get full port name
+                if not port_name: # Skip if port name is invalid
+                    port_item.setHidden(True)
+                    continue
 
-                # Check if port name contains the filter text
-                if filter_text in port_name.lower():
+                port_name_lower = port_name.lower()
+
+                # 1. Check exclusion terms
+                excluded = False
+                for term in exclude_terms:
+                    if term in port_name_lower:
+                        excluded = True
+                        break
+                if excluded:
+                    port_item.setHidden(True)
+                    continue # Skip to next port if excluded
+
+                # 2. Check inclusion terms (all must match)
+                included = True
+                if include_terms: # Only check if there are inclusion terms
+                    for term in include_terms:
+                        if term not in port_name_lower:
+                            included = False
+                            break
+
+                if included:
                     port_item.setHidden(False)
-                    group_visible = True # Make group visible if at least one child is visible
+                    group_visible = True # Make group visible if this port is visible
                 else:
                     port_item.setHidden(True)
 
@@ -2924,12 +4067,17 @@ class JackConnectionManager(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window closing behavior"""
-        if self.minimize_on_close:
-            event.ignore()
-            self.hide() # Minimize to tray instead of closing
-        else:
-            event.accept()
-            QApplication.quit()
+        # Always quit the application when the window is closed
+        event.accept()
+        QApplication.quit()
+
+        # Original logic for minimizing (kept for reference, but bypassed):
+        # if self.minimize_on_close:
+        #     event.ignore()
+        #     self.hide() # Minimize to tray instead of closing
+        # else:
+        #     event.accept()
+        #     QApplication.quit()
 
         # Clean up JACK client and deactivate callbacks
         if hasattr(self, 'client'):
@@ -2949,48 +4097,374 @@ class JackConnectionManager(QMainWindow):
         if hasattr(self, 'latency_process') and self.latency_process is not None:
             self.stop_latency_test()
 
+    # --- Font Size Control Methods ---
+
+    def _apply_port_list_font_size(self):
+        """Applies the current font size to all port list tree widgets."""
+        font = QFont()
+        font.setPointSize(self.port_list_font_size)
+
+        trees_to_update = []
+        if hasattr(self, 'input_tree'): trees_to_update.append(self.input_tree)
+        if hasattr(self, 'output_tree'): trees_to_update.append(self.output_tree)
+        if hasattr(self, 'midi_input_tree'): trees_to_update.append(self.midi_input_tree)
+        if hasattr(self, 'midi_output_tree'): trees_to_update.append(self.midi_output_tree)
+
+        for tree in trees_to_update:
+            tree.setFont(font)
+
+        # Refresh visualizations as item sizes might change
+        self.refresh_visualizations()
+
+    def increase_font_size(self):
+        """Increases the font size for port lists."""
+        max_size = 24
+        if self.port_list_font_size < max_size:
+            self.port_list_font_size += 1
+            self.config_manager.set_str('port_list_font_size', str(self.port_list_font_size))
+            self._apply_port_list_font_size()
+            print(f"Port list font size increased to: {self.port_list_font_size}")
+
+    def decrease_font_size(self):
+        """Decreases the font size for port lists."""
+        min_size = 6
+        if self.port_list_font_size > min_size:
+            self.port_list_font_size -= 1
+            self.config_manager.set_str('port_list_font_size', str(self.port_list_font_size))
+            self._apply_port_list_font_size()
+            print(f"Port list font size decreased to: {self.port_list_font_size}")
+
+    # --- End Font Size Control Methods ---
+
+    def _get_connected_ports(self, port_names, is_input_to_output=True, is_midi=False):
+        """Get connected ports for the given port names."""
+        connected_ports = set()
+        try:
+            if is_input_to_output:
+                # From input to output - look at all output ports
+                output_ports = self.client.get_ports(is_output=True, is_midi=is_midi)
+                for output_port in output_ports:
+                    try:
+                        connections = self.client.get_all_connections(output_port)
+                        # If this output connects to any of our input ports
+                        if any(conn.name in port_names for conn in connections):
+                            connected_ports.add(output_port.name)
+                    except jack.JackError:
+                        continue
+            else:
+                # From output to input - just get direct connections
+                for port_name in port_names:
+                    try:
+                        connections = self.client.get_all_connections(port_name)
+                        connected_ports.update(conn.name for conn in connections)
+                    except jack.JackError:
+                        continue
+        except jack.JackError as e:
+            print(f"Error getting connected ports: {e}")
+        return list(connected_ports)
+
+    def _switch_focus_between_trees(self, forwards=True):
+        """Switch focus between output and input trees in the current tab."""
+        current_tab = self.tab_widget.currentIndex()
+        is_midi = current_tab == 1
+
+        if current_tab == 0:  # Audio tab
+            trees = [self.output_tree, self.input_tree] if forwards else [self.input_tree, self.output_tree]
+        elif current_tab == 1:  # MIDI tab
+            trees = [self.midi_output_tree, self.midi_input_tree] if forwards else [self.midi_input_tree, self.midi_output_tree]
+        else:
+            return  # Do nothing on other tabs
+
+        # Find which tree currently has focus
+        current_tree = None
+        for tree in trees:
+            if tree.hasFocus():
+                current_tree = tree
+                break
+
+        # Switch focus to the other tree
+        if current_tree:
+            other_tree = trees[1] if current_tree == trees[0] else trees[0]
+
+            # Get selected ports from current tree
+            selected_ports = self._get_ports_from_selected_items(current_tree)
+
+            # Find connected ports in the other tree
+            if selected_ports:
+                # Determine direction based on which tree we're moving from
+                is_input_to_output = current_tree in (self.input_tree, self.midi_input_tree)
+                connected_ports = self._get_connected_ports(selected_ports, is_input_to_output, is_midi)
+
+                # Clear current selection in destination tree
+                other_tree.clearSelection()
+
+                # Select connected ports in destination tree
+                for port_name in connected_ports:
+                    port_item = other_tree.port_items.get(port_name)
+                    if port_item:
+                        port_item.setSelected(True)
+
+            # Set focus to destination tree
+            other_tree.setFocus()
+
+            # Update button states after selection and focus change
+            if is_midi:
+                self.update_midi_connection_buttons()
+            else:
+                self.update_connection_buttons()
+        else:
+            # If no tree has focus, focus the first one
+            trees[0].setFocus()
+
+    def setup_shortcuts(self):
+        """Create and connect keyboard shortcuts."""
+        # Connect Shortcut (c)
+        connect_action = QAction("Connect Shortcut", self)
+        connect_action.setShortcut(QKeySequence(Qt.Key.Key_C))
+        connect_action.triggered.connect(self._handle_connect_shortcut)
+        self.addAction(connect_action)
+
+        # Disconnect Shortcut (d)
+        disconnect_action = QAction("Disconnect Shortcut", self)
+        disconnect_action.setShortcuts([QKeySequence(Qt.Key.Key_D), QKeySequence(Qt.Key.Key_Delete)])
+        disconnect_action.triggered.connect(self._handle_disconnect_shortcut)
+        self.addAction(disconnect_action)
+
+        # Undo Shortcut (Ctrl+Z)
+        undo_shortcut_action = QAction("Undo Shortcut", self)
+        undo_shortcut_action.setShortcut(QKeySequence.StandardKey.Undo) # Standard Ctrl+Z
+        undo_shortcut_action.triggered.connect(self.undo_action)
+        self.addAction(undo_shortcut_action)
+
+        # Redo Shortcut (Ctrl+Y / Ctrl+Shift+Z)
+        redo_shortcut_action = QAction("Redo Shortcut", self)
+        # Set both standard Redo (often Ctrl+Shift+Z) and explicit Ctrl+Y
+        redo_shortcut_action.setShortcuts([QKeySequence.StandardKey.Redo, QKeySequence("Ctrl+Y")])
+        redo_shortcut_action.triggered.connect(self.redo_action)
+        self.addAction(redo_shortcut_action)
+
+        # Refresh Shortcut (r)
+        refresh_shortcut_action = QAction("Refresh Shortcut", self)
+        refresh_shortcut_action.setShortcut(QKeySequence(Qt.Key.Key_R))
+        refresh_shortcut_action.triggered.connect(self.refresh_ports) # Connects to the shared refresh method
+        self.addAction(refresh_shortcut_action)
+
+        # Collapse All Shortcut (Alt+C)
+        collapse_all_shortcut_action = QAction("Collapse All Shortcut", self)
+        collapse_all_shortcut_action.setShortcut(QKeySequence("Alt+C"))
+        collapse_all_shortcut_action.triggered.connect(self._handle_collapse_all_shortcut)
+        self.addAction(collapse_all_shortcut_action)
+
+        # Auto Refresh Shortcut (Alt+R)
+        auto_refresh_shortcut_action = QAction("Auto Refresh Shortcut", self)
+        auto_refresh_shortcut_action.setShortcut(QKeySequence("Alt+R"))
+        auto_refresh_shortcut_action.triggered.connect(self._handle_auto_refresh_shortcut)
+        self.addAction(auto_refresh_shortcut_action)
+
+        # Untangle Shortcut (Alt+U)
+        untangle_shortcut_action = QAction("Untangle Shortcut", self)
+        untangle_shortcut_action.setShortcut(QKeySequence("Alt+U"))
+        untangle_shortcut_action.triggered.connect(self._handle_untangle_shortcut)
+        self.addAction(untangle_shortcut_action)
+
+        # Font Size Increase Shortcut (Ctrl++/Ctrl+=)
+        increase_font_action = QAction("Increase Font Size", self)
+        # Add multiple potential shortcuts for increasing font size
+        increase_font_action.setShortcuts([
+            QKeySequence.StandardKey.ZoomIn, # Standard Ctrl++
+            QKeySequence("Ctrl++"),
+            QKeySequence("Ctrl+=")
+        ])
+        increase_font_action.triggered.connect(self.increase_font_size)
+        self.addAction(increase_font_action)
+
+        # Font Size Decrease Shortcut (Ctrl+-)
+        decrease_font_action = QAction("Decrease Font Size", self)
+        decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut) # Standard Ctrl+-
+        decrease_font_action.triggered.connect(self.decrease_font_size)
+        self.addAction(decrease_font_action)
+        # Tab key for switching focus between trees
+        tab_switch_action = QAction("Switch Focus Forwards", self)
+        tab_switch_action.setShortcut(QKeySequence(Qt.Key.Key_Tab))
+        tab_switch_action.triggered.connect(lambda: self._switch_focus_between_trees(forwards=True))
+        self.addAction(tab_switch_action)
+
+        # Shift+Tab for switching focus in reverse
+        tab_switch_back_action = QAction("Switch Focus Backwards", self)
+        tab_switch_back_action.setShortcut(QKeySequence(Qt.Key.Key_Backtab))  # Backtab is Shift+Tab
+        tab_switch_back_action.triggered.connect(lambda: self._switch_focus_between_trees(forwards=False))
+        self.addAction(tab_switch_back_action)
+
+
+    def _handle_connect_shortcut(self):
+        """Calls the appropriate connect method based on the current tab."""
+        current_index = self.tab_widget.currentIndex()
+        if current_index == 0: # Audio Tab
+            self.make_connection_selected()
+        elif current_index == 1: # MIDI Tab
+            self.make_midi_connection_selected()
+        # Ignore if on other tabs
+
+    def _handle_disconnect_shortcut(self):
+        """Calls the appropriate disconnect method based on the current tab."""
+        current_index = self.tab_widget.currentIndex()
+        if current_index == 0: # Audio Tab
+            self.break_connection_selected()
+        elif current_index == 1: # MIDI Tab
+            self.break_midi_connection_selected()
+        # Ignore if on other tabs
+
+    def _handle_collapse_all_shortcut(self):
+        """Toggles the 'Collapse All' checkbox."""
+        if hasattr(self, 'collapse_all_checkbox'):
+            self.collapse_all_checkbox.toggle()
+
+    def _handle_auto_refresh_shortcut(self):
+        pass # Placeholder
+    def _update_untangle_button_text(self):
+        """Updates the text of the untangle button based on the current mode."""
+        modes = {
+            0: "Untangle: Off",
+            1: "Untangle: >>",
+            2: "Untangle: <<"
+        }
+        if self.untangle_button: # Check if button exists before setting text
+            self.untangle_button.setText(modes.get(self.untangle_mode, "Untangle: Unknown"))
+ 
+    def toggle_untangle_sort(self):
+        """Cycles the untangle sort mode and refreshes the port lists."""
+        self.untangle_mode = (self.untangle_mode + 1) % 3 # Cycle 0 -> 1 -> 2 -> 0
+        self.config_manager.set_int('untangle_mode', self.untangle_mode)
+        self._update_untangle_button_text()
+        print(f"Untangle sort mode set to: {self.untangle_mode}")
+        self.untangle_mode_changed.emit(self.untangle_mode) # Emit signal
+        self.refresh_ports(refresh_all=True) # Refresh both lists
+
+    def _handle_untangle_shortcut(self):
+        """Handles the Alt+U shortcut for cycling untangle sort."""
+        self.toggle_untangle_sort() # Directly call the cycle method
+
+
+    def _save_current_loaded_preset(self):
+        """Saves the current connections to the currently loaded preset file without confirmation."""
+        if not self.current_preset_name:
+            QMessageBox.warning(self, "Save Preset Error", "No preset is currently loaded.")
+            return
+
+        preset_name = self.current_preset_name
+        print(f"Saving current connections to loaded preset: '{preset_name}'")
+        current_connections = self._get_current_connections()
+        # Pass confirm_overwrite=False to skip the dialog
+        if self.preset_manager.save_preset(preset_name, current_connections, parent_widget=self, confirm_overwrite=False):
+            print(f"Preset '{preset_name}' saved.")
+            show_timed_messagebox(self, QMessageBox.Icon.Information, "Preset Saved", f"Preset '{preset_name}' saved successfully.")
+        # No else needed, save_preset shows critical error message on failure
+
+
+    def _set_startup_preset(self, name):
+       """Sets the selected preset name as the startup preset in the config."""
+       print(f"Setting startup preset to: {name}")
+       self.startup_preset_name = name # Update internal state
+       # Save the actual preset name, or None (which ConfigManager saves as empty string)
+       self.config_manager.set_str('startup_preset', name)
+       # No need to update menu check state here as it's closed
+
 def main():
+    # --- Add Argument Parsing ---
+    parser = argparse.ArgumentParser(description='JACK Connection Manager (Cables)')
+    parser.add_argument('--headless', action='store_true',
+                        help='Load startup preset and exit without showing GUI.')
+    args = parser.parse_args()
+    # --- End Argument Parsing ---
+
     # Redirect stderr to /dev/null to suppress JACK callback errors (redundant, but kept for safety):
     if not os.environ.get('DEBUG_JACK_CALLBACKS'):
         sys.stderr = open(os.devnull, 'w')
 
+    # --- Create QApplication FIRST ---
     app = QApplication(sys.argv)
     # Set the desktop filename for correct icon display in taskbar and window decorations
     QGuiApplication.setDesktopFileName("com.example.cable")
-    window = JackConnectionManager()
-    window.show()
+    # --- End QApplication Creation ---
 
-    # Handle Ctrl+C gracefully
-    import signal
-    def signal_handler(signum, frame):
-        print("Received signal to terminate")
-        window.close()
-        app.quit()
-        sys.exit(0)
+    # --- Headless Mode Logic ---
+    if args.headless:
+        print("Connection Manager starting in headless mode...")
+        # Create a minimal instance just to load the preset
+        # QApplication already exists now
+        headless_manager = JackConnectionManager() # Creates client, loads config, but doesn't auto-refresh/load preset
+        # Explicitly load startup preset if defined
+        if headless_manager.startup_preset_name and headless_manager.startup_preset_name != 'None':
+            print(f"Headless mode: Attempting to load startup preset '{headless_manager.startup_preset_name}'...")
+            # Call load preset, check success
+            success = headless_manager._load_selected_preset(headless_manager.startup_preset_name, is_startup=True)
+            if success:
+                print(f"Startup preset '{headless_manager.startup_preset_name}' loaded successfully.")
+                # Save the successfully loaded preset name to config
+                headless_manager.config_manager.set_str('active_preset', headless_manager.startup_preset_name)
+                print(f"Headless: Set active_preset in config to '{headless_manager.startup_preset_name}'")
+            else:
+                print(f"Failed to load startup preset '{headless_manager.startup_preset_name}'.")
+                # Clear the active preset in config on failure
+                headless_manager.config_manager.set_str('active_preset', None)
+                print("Headless: Cleared active_preset in config due to load failure.")
+        else:
+            print("Headless mode: No startup preset configured.")
+            # Ensure active preset is cleared if none is configured for startup
+            headless_manager.config_manager.set_str('active_preset', None)
+            print("Headless: Cleared active_preset in config (no startup preset).")
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+        # Exit after a short delay to allow JACK connections to establish
+        QTimer.singleShot(1000, QApplication.quit) # Exit after 1 second
+        window = None # No main window needed in headless mode
+    else:
+        # --- Normal GUI Mode ---
+        window = JackConnectionManager() # Create the main window only for GUI mode
+        window.start_startup_refresh() # Start the refresh sequence for GUI mode now
+
+        # Handle Ctrl+C gracefully (only needed for GUI mode)
+        import signal
+        def signal_handler(signum, frame):
+            print("Received signal to terminate")
+            if window: window.close() # Close window if it exists
+            app.quit()
+            sys.exit(0)
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        window.show()
 
     try:
         # Custom event loop that processes both Qt events and signals
-        while window.isVisible():
-            app.processEvents()
-            # Small sleep to prevent CPU hogging
-            from time import sleep
-            sleep(0.001)  # 1ms sleep
-        return 0
-    except KeyboardInterrupt:
+        # Run the event loop regardless of headless mode to allow timers to fire
+        exit_code = app.exec()
+        if args.headless:
+            print("Headless preset load finished.")
+        return exit_code
+    except KeyboardInterrupt: # This might not be reachable in headless mode due to QTimer exit
         print("Received keyboard interrupt")
         window.close()
         app.quit()
         return 1
     finally:
         # Ensure cleanup happens
-        if window.pw_process is not None:
+        # Check if window exists before accessing its attributes
+        if window and window.pw_process is not None:
             window.stop_pwtop_process()
-        if hasattr(window, 'client'):
-            window.client.deactivate()
-            window.client.close()
+        # Check if headless_manager exists for cleanup, otherwise check window
+        # Ensure client cleanup happens correctly for both modes
+        client_to_close = None
+        if args.headless and headless_manager and hasattr(headless_manager, 'client'):
+             client_to_close = headless_manager.client
+        elif not args.headless and window and hasattr(window, 'client'):
+             client_to_close = window.client
+
+        if client_to_close:
+            try:
+                client_to_close.deactivate()
+                client_to_close.close()
+                print("JACK client closed.")
+            except Exception as e:
+                print(f"Error closing JACK client: {e}")
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='cable',
-    version='0.9.2',
+    version='0.9.3',
     py_modules=['Cable'],
     entry_points={
         'console_scripts': [
