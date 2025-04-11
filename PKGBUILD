@@ -7,14 +7,14 @@ pkgdesc="A PyQt6 application to dynamically modify Pipewire and Wireplumber sett
 arch=('any')
 url="https://github.com/magillos/Cable"
 license=('GPL-3.0')
-depends=('python' 'python-pyqt6' 'python-jack-client' 'jack_delay')
+depends=('python' 'python-pyqt6' 'python-jack-client' 'jack_delay' 'python-requests')
 makedepends=('python-setuptools')
 if [ -n "${USE_LOCAL}" ]; then
   source=("${USE_LOCAL_PATH:-./Cable-$pkgver.tar.gz}")
   sha256sums=('SKIP')
 else
   source=("cable-$pkgver.tar.gz::https://github.com/magillos/Cable/archive/refs/tags/$pkgver.tar.gz")
-  sha256sums=('5cbf7f39248dc474b68b42ea489b80d2c237a6d66beb58816ac04a04153e4709')
+  sha256sums=('5e11f95f104dc44909e378cf6b6c0a6c7d9e085c55433de7240be2cb9f2e8254')
 fi
 
 
