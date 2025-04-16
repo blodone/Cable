@@ -1,21 +1,21 @@
 import sys
 import random
 import re
-import argparse # <-- Add argparse
+import argparse
 import configparser
 import os
-import shutil # Import shutil for command existence check
-import json # <-- Add import for JSON handling
+import shutil
+import json
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QListWidget, QPushButton, QLabel,
                              QGraphicsView, QGraphicsScene, QTabWidget, QListWidgetItem,
                              QGraphicsPathItem, QCheckBox, QMenu, QSizePolicy, QSpacerItem,
                              QButtonGroup, QTextEdit, QTreeWidget, QTreeWidgetItem, QLineEdit,
-                             QComboBox, QMessageBox, QWidgetAction) # Added QLineEdit, QComboBox, QMessageBox, QWidgetAction
+                             QComboBox, QMessageBox, QWidgetAction)
 from PyQt6.QtCore import Qt, QMimeData, QPointF, QRectF, QTimer, QSize, QRect, QProcess, pyqtSignal, QPoint
 from PyQt6.QtGui import (QDrag, QColor, QPainter, QBrush, QPalette, QPen,
                          QPainterPath, QFontMetrics, QFont, QAction, QPixmap, QGuiApplication, QTextCursor, QActionGroup,
-                         QKeySequence) # Added QTextCursor, QKeySequence
+                         QKeySequence)
 import jack
 
 # Add custom handler for unraisable exceptions
@@ -63,7 +63,8 @@ class ConfigManager:
             'auto_refresh_enabled': 'True',  # Add default for auto refresh
             'collapse_all_enabled': 'False', # Add default for collapse all
             'port_list_font_size': '10',      # Add default for port list font size
-            'untangle_mode': '0'             # Add default for untangle sort mode (0=off, 1=normal, 2=reversed)
+            'untangle_mode': '0',             # Add default for untangle sort mode (0=off, 1=normal, 2=reversed)
+            'last_active_tab': '0'           # Add default for last active tab (0=Audio)
         }
 
         for key, value in defaults.items():
@@ -231,8 +232,9 @@ class PortTreeWidget(QTreeWidget):
     """A tree widget for displaying ports with collapsible groups"""
     itemDragged = pyqtSignal(QTreeWidgetItem)
 
-    def __init__(self, parent=None):
+    def __init__(self, port_role, parent=None): # Added port_role
         super().__init__(parent)
+        self.port_role = port_role # Store the role ('input' or 'output')
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -248,7 +250,7 @@ class PortTreeWidget(QTreeWidget):
         # Allow selecting multiple items with Ctrl/Shift
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.setAcceptDrops(True)
-        self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)  # Fixed: DragAndDrop → DragDrop
+        self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)
         self.setDefaultDropAction(Qt.DropAction.CopyAction)
         # Add tracking to improve drag behavior
         self.setMouseTracking(True)
@@ -257,19 +259,7 @@ class PortTreeWidget(QTreeWidget):
         # Add storage for mouse press position
         self.mousePressPos = None
 
-        # --- Add Actions for Shortcuts ---
-        self._move_up_action = QAction("Move Up", self)
-        self._move_up_action.setShortcut(QKeySequence("Alt+Up"))
-        self._move_up_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut) # Set context
-        self._move_up_action.triggered.connect(self._trigger_move_up)
-        self.addAction(self._move_up_action)
-
-        self._move_down_action = QAction("Move Down", self)
-        self._move_down_action.setShortcut(QKeySequence("Alt+Down"))
-        self._move_down_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut) # Set context
-        self._move_down_action.triggered.connect(self._trigger_move_down)
-        self.addAction(self._move_down_action)
-        # --- End Actions for Shortcuts ---
+        # Actions for Move Up/Down moved to JackConnectionManager
     def sizeHint(self):
         return QSize(self._width, 300)  # Default height
 
@@ -599,15 +589,18 @@ class PortTreeWidget(QTreeWidget):
 
                 # --- Add Move Up/Down Actions ---
                 menu.addSeparator()
-                # Use the instance actions created in __init__
+                # Use the global actions from the main window
+                move_up_action = self.window().move_group_up_action
+                move_down_action = self.window().move_group_down_action
+
                 # Update their enabled state based on the context item
                 current_index = self.indexOfTopLevelItem(item)
-                self._move_up_action.setEnabled(current_index > 0)
-                self._move_down_action.setEnabled(current_index < self.topLevelItemCount() - 1)
+                move_up_action.setEnabled(current_index > 0)
+                move_down_action.setEnabled(current_index < self.topLevelItemCount() - 1)
 
-                # Add the existing actions to the menu
-                menu.addAction(self._move_up_action)
-                menu.addAction(self._move_down_action)
+                # Add the global actions to the menu
+                menu.addAction(move_up_action)
+                menu.addAction(move_down_action)
                 # --- End Move Up/Down Actions ---
 
                 menu.exec(self.mapToGlobal(position))
@@ -665,11 +658,13 @@ class PortTreeWidget(QTreeWidget):
     def mouseMoveEvent(self, event):
         """Custom mouse move event to help with drag detection"""
         if event.buttons() & Qt.MouseButton.LeftButton and self.initialSelection and self.mousePressPos:
-            # Only start drag if we've moved a minimum distance
-            if (event.pos() - self.mousePressPos).manhattanLength() >= QApplication.startDragDistance():
-                # Only allow drag from port items (not groups)
-                if self.initialSelection.childCount() == 0:
-                    self.startDrag()
+            # Only start drag if we've moved a minimum distance and have a valid selection
+            if self.initialSelection and (event.pos() - self.mousePressPos).manhattanLength() >= QApplication.startDragDistance():
+                 # Let subclasses handle the actual drag start if needed
+                 # Check if the initial selection is draggable (port or group)
+                 # This check might be better placed within the startDrag method itself
+                 # if self.initialSelection.childCount() == 0 or self.initialSelection.parent() is None: # Allow dragging ports or groups
+                 self.startDrag() # Call the potentially overridden startDrag
         super().mouseMoveEvent(event)
 
     def move_group_up(self, item):
@@ -700,88 +695,67 @@ class PortTreeWidget(QTreeWidget):
             self.setCurrentItem(taken_item) # Keep the moved item selected
             self.group_order = self.get_current_group_order() # Update stored order
 
-    def _trigger_move_up(self):
-        """Slot for the move up shortcut action."""
-        item = self.currentItem()
-        if item and item.parent() is None: # Only move top-level items (groups)
-            self.move_group_up(item)
-
-    def _trigger_move_down(self):
-        """Slot for the move down shortcut action."""
-        item = self.currentItem()
-        if item and item.parent() is None: # Only move top-level items (groups)
-            self.move_group_down(item)
-
-
-class DragPortTreeWidget(PortTreeWidget):  # Output Tree
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # Allow both drag and drop for bidirectional connections
-        self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)
-        self.setAcceptDrops(True)
+    # _trigger_move_up and _trigger_move_down removed, handled by JackConnectionManager
+    # --- Drag and Drop Methods (Moved from Subclasses) ---
 
     def startDrag(self, supportedActions=None):
-        """Start drag operation with port name or group data"""
+        """Start drag operation, setting the correct port role based on self.port_role."""
+        # --- Create Mime Data ---
         selected_items = self.selectedItems()
-        if not selected_items:
-            return
+        if not selected_items or not self.initialSelection: # Ensure drag was initiated properly
+             return
 
-        # Filter out group items if multiple items are selected
         port_items = [item for item in selected_items if item.childCount() == 0]
         group_items = [item for item in selected_items if item.childCount() > 0]
 
         mime_data = QMimeData()
         drag_text = ""
+        port_role_bytes = self.port_role.encode('utf-8') # Use self.port_role
 
         if len(port_items) > 1:
-            # Dragging multiple ports
             port_names = [item.data(0, Qt.ItemDataRole.UserRole) for item in port_items if item.data(0, Qt.ItemDataRole.UserRole)]
-            if not port_names: return # No valid ports selected
-
-            mime_data.setData("application/x-port-list", b"true") # Indicate multiple ports
-            mime_data.setData("application/x-port-role", b"output")
-            mime_data.setText('\n'.join(port_names)) # Store port list
-            drag_text = f"{len(port_names)} Output Ports" # Text for pixmap
+            if not port_names: return
+            mime_data.setData("application/x-port-list", b"true")
+            mime_data.setData("application/x-port-role", port_role_bytes)
+            mime_data.setText('\n'.join(port_names))
+            drag_text = f"{len(port_names)} {self.port_role.capitalize()} Ports"
 
         elif len(port_items) == 1 and not group_items:
-            # Dragging a single port (original logic)
             item = port_items[0]
             port_name = item.data(0, Qt.ItemDataRole.UserRole)
-            if not port_name: return # Don't drag invalid items
-
-            mime_data.setData("application/x-port-role", b"output")
+            if not port_name: return
+            mime_data.setData("application/x-port-role", port_role_bytes)
             mime_data.setText(port_name)
-            drag_text = item.text(0) # Use displayed text for pixmap
+            drag_text = item.text(0)
 
         elif len(group_items) == 1 and not port_items:
-            # Dragging a single group (original logic)
             item = group_items[0]
             group_name = item.text(0)
             port_list = self.window()._get_ports_in_group(item)
-            if not port_list: return # Don't drag empty groups
-
+            if not port_list: return
             mime_data.setData("application/x-port-group", b"true")
-            mime_data.setData("application/x-port-role", b"output")
-            mime_data.setText('\n'.join(port_list)) # Store port list as newline-separated text
-            drag_text = group_name # Text for pixmap
-
+            mime_data.setData("application/x-port-role", port_role_bytes)
+            mime_data.setText('\n'.join(port_list))
+            drag_text = group_name
         else:
-            # Invalid selection for dragging (e.g., mixed ports and groups, or nothing valid)
-            return
+            # Allow dragging multiple groups? For now, treat as invalid like before.
+            # If multiple groups or mix of groups/ports selected, maybe just return?
+            # The original code returned on invalid selection, let's keep that.
+            print("Drag cancelled: Invalid selection (mix of groups/ports or multiple groups).")
+            return # Invalid selection
 
+        # --- Perform Drag ---
         drag = QDrag(self)
         drag.setMimeData(mime_data)
 
-        # Add visual feedback (using drag_text)
-        # Create a generic pixmap for drag feedback
+        # Create pixmap (same as before)
         font_metrics = QFontMetrics(self.font())
-        text_width = font_metrics.horizontalAdvance(drag_text) + 10 # Add padding
-        pixmap_width = max(70, text_width) # Ensure minimum width
+        text_width = font_metrics.horizontalAdvance(drag_text) + 10
+        pixmap_width = max(70, text_width)
         pixmap = QPixmap(pixmap_width, 20)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setPen(self.palette().color(QPalette.ColorRole.Text))
-        # Use ElideRight if text is too long for the pixmap
         elided_text = font_metrics.elidedText(drag_text, Qt.TextElideMode.ElideRight, pixmap_width)
         painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, elided_text)
         painter.end()
@@ -793,347 +767,148 @@ class DragPortTreeWidget(PortTreeWidget):  # Output Tree
         self.initialSelection = None # Clear selection after drag finishes
 
     def dragEnterEvent(self, event):
-        """Handle drag enter events to determine if drop should be accepted"""
+        """Accept drops only if the source role is the opposite of this tree's role."""
         mime_data = event.mimeData()
-        is_port_drop = mime_data.hasFormat("application/x-port-role")
-        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # New check
-        is_group_drop = mime_data.hasFormat("application/x-port-group")
+        has_role = mime_data.hasFormat("application/x-port-role")
+        has_list = mime_data.hasFormat("application/x-port-list")
+        has_group = mime_data.hasFormat("application/x-port-group")
 
-        # Accept if it's a single port, a list of ports, or a group, AND the role is input
-        if (is_port_drop or is_port_list_drop or is_group_drop):
-            role = mime_data.data("application/x-port-role")
-            if role == b"input":  # Only accept input ports/groups for drops on output tree
+        if has_role and (has_list or has_group or mime_data.hasText()): # Check text for single port drag
+            source_role_bytes = mime_data.data("application/x-port-role")
+            # Determine the expected opposite role
+            expected_source_role = b"input" if self.port_role == 'output' else b"output"
+
+            # Accept if the source role is the expected opposite role
+            if source_role_bytes == expected_source_role:
                 event.acceptProposedAction()
                 return
 
         event.ignore()
 
     def dragMoveEvent(self, event):
-        """Handle drag move events for visual feedback, supporting ports and groups."""
+        """Provide visual feedback during drag, accepting if roles are compatible."""
         mime_data = event.mimeData()
-        is_port_drag = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
-        is_port_list_drag = mime_data.hasFormat("application/x-port-list") # Multiple ports
-        is_group_drag = mime_data.hasFormat("application/x-port-group")
+        has_role = mime_data.hasFormat("application/x-port-role")
+        has_list = mime_data.hasFormat("application/x-port-list")
+        has_group = mime_data.hasFormat("application/x-port-group")
 
-        # 1. Check if it's a valid drag type we handle (Input role)
-        if not (is_port_drag or is_port_list_drag or is_group_drag) or mime_data.data("application/x-port-role") != b"input":
-            event.ignore()
-            # Clear highlight if needed
+        # Check if it's a valid drag type with the correct opposite role
+        valid_drag = False
+        if has_role and (has_list or has_group or mime_data.hasText()): # Check text for single port drag
+            source_role_bytes = mime_data.data("application/x-port-role")
+            expected_source_role = b"input" if self.port_role == 'output' else b"output"
+            if source_role_bytes == expected_source_role: # Opposite role check
+                valid_drag = True
+
+        target_item = self.itemAt(event.position().toPoint())
+
+        if valid_drag and target_item:
+            # Valid drag over a potential target item
+            if target_item != self.current_drag_highlight_item:
+                self.window().clear_drop_target_highlight(self)
+                self.window().highlight_drop_target_item(self, target_item)
+                self.current_drag_highlight_item = target_item
+            event.acceptProposedAction()
+        else:
+            # Invalid drag type, wrong role, or not over an item
             if self.current_drag_highlight_item:
                 self.window().clear_drop_target_highlight(self)
                 self.current_drag_highlight_item = None
-            return
-
-        # 2. Get item under cursor (Target item in Output tree)
-        target_item = self.itemAt(event.position().toPoint())
-
-        # 3. Determine if the target item is a valid drop target for the current drag source
-        # Now, any target (port or group) is valid if the source is an Input port/group/list
-        is_valid_target = bool(target_item)
-
-        # 4. Handle highlighting and accepting/ignoring
-        if is_valid_target:
-            if target_item != self.current_drag_highlight_item:
-                self.window().clear_drop_target_highlight(self)
-                self.window().highlight_drop_target_item(self, target_item) # Highlight the valid target
-                self.current_drag_highlight_item = target_item
-            event.acceptProposedAction() # Accept move over valid target
-        else:
-            # Invalid target or no item under cursor
-            if self.current_drag_highlight_item: # Clear highlight if there was one
-                self.window().clear_drop_target_highlight(self)
-                self.current_drag_highlight_item = None
-            event.ignore() # Ignore move over invalid target
+            event.ignore()
 
     def dropEvent(self, event):
-        """Handle drop events to create connections for ports or groups."""
+        """Handle drop event, connecting source to target based on roles."""
         mime_data = event.mimeData()
-        is_port_drop = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
-        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # Multiple ports
-        is_group_drop = mime_data.hasFormat("application/x-port-group")
+        has_role = mime_data.hasFormat("application/x-port-role")
+        has_list = mime_data.hasFormat("application/x-port-list")
+        has_group = mime_data.hasFormat("application/x-port-group")
 
-        # 1. Check validity (Source must be Input)
-        if not (is_port_drop or is_port_list_drop or is_group_drop) or mime_data.data("application/x-port-role") != b"input":
+        # 1. Check validity (Source role must be opposite of target role)
+        expected_source_role = b"input" if self.port_role == 'output' else b"output"
+        if not (has_role and (has_list or has_group or mime_data.hasText()) and mime_data.data("application/x-port-role") == expected_source_role):
             event.ignore()
             self.window().clear_drop_target_highlight(self)
             self.current_drag_highlight_item = None
             return
 
-        # 2. Get target item (Output tree)
+        # 2. Get target item and ports (This tree)
         target_item = self.itemAt(event.position().toPoint())
         if not target_item:
+            event.ignore() # Dropped outside an item
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
+            return
+
+        target_ports = self.window()._get_ports_in_group(target_item) # Handles both port and group items
+        if not target_ports:
+            event.ignore() # Target item has no associated ports
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
+            return
+
+        # Store target identifier *before* connection/refresh
+        target_is_group = target_item.childCount() > 0
+        target_identifier = target_item.text(0) if target_is_group else target_item.data(0, Qt.ItemDataRole.UserRole)
+
+        # 3. Get source ports (From mime data)
+        source_ports = [port for port in mime_data.text().split('\n') if port]
+        if not source_ports:
+            event.ignore() # No source ports in mime data
+            self.window().clear_drop_target_highlight(self)
+            self.current_drag_highlight_item = None
+            return
+
+        # 4. Perform connection based on target tree role
+        if self.port_role == 'output':
+            # Target is Output tree, Source is Input
+            print(f"Drop Event (Output Tree): Connecting Outputs(Target)={target_ports}, Inputs(Source)={source_ports}")
+            self.window().make_multiple_connections(target_ports, source_ports)
+        elif self.port_role == 'input':
+            # Target is Input tree, Source is Output
+            print(f"Drop Event (Input Tree): Connecting Outputs(Source)={source_ports}, Inputs(Target)={target_ports}")
+            self.window().make_multiple_connections(source_ports, target_ports)
+        else:
+            # Should not happen
+            print(f"Error: Unknown port_role '{self.port_role}' in dropEvent")
             event.ignore()
             self.window().clear_drop_target_highlight(self)
             self.current_drag_highlight_item = None
             return
 
-        is_target_group = target_item.childCount() > 0
-        target_ports = []
-        if is_target_group:
-            target_ports = self.window()._get_ports_in_group(target_item)
-        else:
-            target_port_name = target_item.data(0, Qt.ItemDataRole.UserRole)
-            if target_port_name:
-                target_ports = [target_port_name] # Treat single port as list
+        event.acceptProposedAction()
 
-        if not target_ports: # No valid target port(s) found
-            event.ignore()
-            self.window().clear_drop_target_highlight(self)
-            self.current_drag_highlight_item = None
-            return
-
-        # 3. Get source ports (Input)
-        source_ports = mime_data.text().split('\n')
-        # Filter out empty strings that might result from splitting
-        source_ports = [port for port in source_ports if port]
-        if not source_ports: # No valid source ports
-             event.ignore()
-             self.window().clear_drop_target_highlight(self)
-             self.current_drag_highlight_item = None
-             return
-
-        # 4. Perform connection based on source and target types
-        connection_made = False
-        # Check for single port -> single port case
-        if not is_group_drop and not is_port_list_drop and not is_target_group and len(source_ports) == 1 and len(target_ports) == 1:
-             # Single Input Port -> Single Output Port
-             output_name = target_ports[0]
-             input_name = source_ports[0]
-             print(f"Connecting single: {output_name} -> {input_name}")
-             self.window().make_connection(output_name, input_name)
-             connection_made = True
-        # Check for cases involving groups or multiple ports
-        elif (is_group_drop or is_port_list_drop or is_target_group):
-             # Use make_multiple_connections for Group->Port, Port->Group, Group->Group, List->Port, List->Group
-             print(f"Connecting multiple/group: Outputs={target_ports}, Inputs={source_ports}")
-             self.window().make_multiple_connections(target_ports, source_ports)
-             connection_made = True
-        else:
-             # This case might occur if logic above is flawed, or unexpected drop type
-             print(f"Warning: Unhandled drop scenario in DragPortTreeWidget. Outputs={target_ports}, Inputs={source_ports}")
-             event.ignore()
-
-
+        # Find the target item again *after* potential refresh and set selection
+        new_target_item = None
+        if target_identifier:
+            if target_is_group:
+                for i in range(self.topLevelItemCount()):
+                    item = self.topLevelItem(i)
+                    if item and item.text(0) == target_identifier:
+                        new_target_item = item
+                        break
+            else: # It was a port item
+                new_target_item = self.port_items.get(target_identifier)
+        if new_target_item:
+            self.setCurrentItem(new_target_item)
         # 5. Finalize
-        if connection_made:
-            event.acceptProposedAction()
-        else:
-            # This case should ideally not be reached if source/target ports are valid
-            event.ignore()
-
         self.window().clear_drop_target_highlight(self)
         self.current_drag_highlight_item = None
 
-class DropPortTreeWidget(PortTreeWidget):  # Input Tree
+
+
+class DragPortTreeWidget(PortTreeWidget):  # Output Tree (Source Role: Output)
     def __init__(self, parent=None):
-        super().__init__(parent)
-        # Allow both drag and drop for bidirectional connections
-        self.setDragDropMode(QTreeWidget.DragDropMode.DragDrop)
-        self.setAcceptDrops(True)
+        super().__init__(port_role='output', parent=parent) # Set role
+        # DragDropMode and AcceptDrops are set in base class
 
-    def startDrag(self, supportedActions=None):
-        """Start drag operation with port name or group data"""
-        selected_items = self.selectedItems()
-        if not selected_items:
-            return
+        # Methods moved to PortTreeWidget base class
 
-        # Filter out group items if multiple items are selected
-        port_items = [item for item in selected_items if item.childCount() == 0]
-        group_items = [item for item in selected_items if item.childCount() > 0]
+class DropPortTreeWidget(PortTreeWidget):  # Input Tree (Source Role: Input)
+    def __init__(self, parent=None):
+        super().__init__(port_role='input', parent=parent) # Set role
+        # DragDropMode and AcceptDrops are set in base class
 
-        mime_data = QMimeData()
-        drag_text = ""
-
-        if len(port_items) > 1:
-            # Dragging multiple ports
-            port_names = [item.data(0, Qt.ItemDataRole.UserRole) for item in port_items if item.data(0, Qt.ItemDataRole.UserRole)]
-            if not port_names: return # No valid ports selected
-
-            mime_data.setData("application/x-port-list", b"true") # Indicate multiple ports
-            mime_data.setData("application/x-port-role", b"input") # Role is input
-            mime_data.setText('\n'.join(port_names)) # Store port list
-            drag_text = f"{len(port_names)} Input Ports" # Text for pixmap
-
-        elif len(port_items) == 1 and not group_items:
-            # Dragging a single port (original logic)
-            item = port_items[0]
-            port_name = item.data(0, Qt.ItemDataRole.UserRole)
-            if not port_name: return # Don't drag invalid items
-
-            mime_data.setData("application/x-port-role", b"input") # Role is input
-            mime_data.setText(port_name)
-            drag_text = item.text(0) # Use displayed text for pixmap
-
-        elif len(group_items) == 1 and not port_items:
-            # Dragging a single group (original logic)
-            item = group_items[0]
-            group_name = item.text(0)
-            port_list = self.window()._get_ports_in_group(item)
-            if not port_list: return # Don't drag empty groups
-
-            mime_data.setData("application/x-port-group", b"true")
-            mime_data.setData("application/x-port-role", b"input") # Role is input for this tree
-            mime_data.setText('\n'.join(port_list)) # Store port list as newline-separated text
-            drag_text = group_name # Text for pixmap
-
-        else:
-            # Invalid selection for dragging (e.g., mixed ports and groups, or nothing valid)
-            return
-
-        drag = QDrag(self)
-        drag.setMimeData(mime_data)
-
-        # Add visual feedback (using drag_text)
-        # Create a generic pixmap for drag feedback
-        font_metrics = QFontMetrics(self.font())
-        text_width = font_metrics.horizontalAdvance(drag_text) + 10 # Add padding
-        pixmap_width = max(70, text_width) # Ensure minimum width
-        pixmap = QPixmap(pixmap_width, 20)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
-        # Use ElideRight if text is too long for the pixmap
-        elided_text = font_metrics.elidedText(drag_text, Qt.TextElideMode.ElideRight, pixmap_width)
-        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, elided_text)
-        painter.end()
-
-        drag.setPixmap(pixmap)
-        drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
-
-        result = drag.exec(Qt.DropAction.CopyAction)
-        self.initialSelection = None # Clear selection after drag finishes
-
-    def dragEnterEvent(self, event):
-        """Handle drag enter events to determine if drop should be accepted"""
-        mime_data = event.mimeData()
-        is_port_drop = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
-        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # Multiple ports
-        is_group_drop = mime_data.hasFormat("application/x-port-group")
-
-        # Accept if it's a single port, a list of ports, or a group, AND the role is output
-        if (is_port_drop or is_port_list_drop or is_group_drop):
-            # Role is always present for both port and group drags
-            role = mime_data.data("application/x-port-role")
-            if role == b"output":  # Only accept output ports/groups for drops on input tree
-                event.acceptProposedAction()
-                return
-
-        event.ignore()
-
-    def dragMoveEvent(self, event):
-        """Handle drag move events for visual feedback, supporting ports and groups."""
-        mime_data = event.mimeData()
-        is_port_drag = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
-        is_port_list_drag = mime_data.hasFormat("application/x-port-list") # Multiple ports
-        is_group_drag = mime_data.hasFormat("application/x-port-group")
-
-        # 1. Check if it's a valid drag type we handle (Output role)
-        if not (is_port_drag or is_port_list_drag or is_group_drag) or mime_data.data("application/x-port-role") != b"output":
-            event.ignore()
-            # Clear highlight if needed
-            if self.current_drag_highlight_item:
-                self.window().clear_drop_target_highlight(self)
-                self.current_drag_highlight_item = None
-            return
-
-        # 2. Get item under cursor (Target item in Input tree)
-        target_item = self.itemAt(event.position().toPoint())
-
-        # 3. Determine if the target item is a valid drop target for the current drag source
-        # Now, any target (port or group) is valid if the source is an Output port/group/list
-        is_valid_target = bool(target_item)
-
-        # 4. Handle highlighting and accepting/ignoring
-        if is_valid_target:
-            if target_item != self.current_drag_highlight_item:
-                self.window().clear_drop_target_highlight(self)
-                self.window().highlight_drop_target_item(self, target_item) # Highlight the valid target
-                self.current_drag_highlight_item = target_item
-            event.acceptProposedAction() # Accept move over valid target
-        else:
-            # Invalid target or no item under cursor
-            if self.current_drag_highlight_item: # Clear highlight if there was one
-                self.window().clear_drop_target_highlight(self)
-                self.current_drag_highlight_item = None
-            event.ignore() # Ignore move over invalid target
-
-    def dropEvent(self, event):
-        """Handle drop events to create connections for ports or groups."""
-        mime_data = event.mimeData()
-        is_port_drop = mime_data.hasFormat("application/x-port-role") and not mime_data.hasFormat("application/x-port-list") # Single port
-        is_port_list_drop = mime_data.hasFormat("application/x-port-list") # Multiple ports
-        is_group_drop = mime_data.hasFormat("application/x-port-group")
-
-        # 1. Check validity (Source must be Output)
-        if not (is_port_drop or is_port_list_drop or is_group_drop) or mime_data.data("application/x-port-role") != b"output":
-            event.ignore()
-            self.window().clear_drop_target_highlight(self)
-            self.current_drag_highlight_item = None
-            return
-
-        # 2. Get target item (Input tree)
-        target_item = self.itemAt(event.position().toPoint())
-        if not target_item:
-            event.ignore()
-            self.window().clear_drop_target_highlight(self)
-            self.current_drag_highlight_item = None
-            return
-
-        is_target_group = target_item.childCount() > 0
-        target_ports = []
-        if is_target_group:
-            target_ports = self.window()._get_ports_in_group(target_item)
-        else:
-            target_port_name = target_item.data(0, Qt.ItemDataRole.UserRole)
-            if target_port_name:
-                target_ports = [target_port_name] # Treat single port as list
-
-        if not target_ports: # No valid target port(s) found
-            event.ignore()
-            self.window().clear_drop_target_highlight(self)
-            self.current_drag_highlight_item = None
-            return
-
-        # 3. Get source ports (Output)
-        source_ports = mime_data.text().split('\n')
-        # Filter out empty strings that might result from splitting
-        source_ports = [port for port in source_ports if port]
-        if not source_ports: # No valid source ports
-             event.ignore()
-             self.window().clear_drop_target_highlight(self)
-             self.current_drag_highlight_item = None
-             return
-
-        # 4. Perform connection based on source and target types
-        connection_made = False
-        # Check for single port -> single port case
-        if not is_group_drop and not is_port_list_drop and not is_target_group and len(source_ports) == 1 and len(target_ports) == 1:
-             # Single Output Port -> Single Input Port
-             output_name = source_ports[0]
-             input_name = target_ports[0]
-             print(f"Connecting single: {output_name} -> {input_name}")
-             self.window().make_connection(output_name, input_name)
-             connection_made = True
-        # Check for cases involving groups or multiple ports
-        elif (is_group_drop or is_port_list_drop or is_target_group):
-             # Use make_multiple_connections for Group->Port, Port->Group, Group->Group, List->Port, List->Group
-             print(f"Connecting multiple/group: Outputs={source_ports}, Inputs={target_ports}")
-             self.window().make_multiple_connections(source_ports, target_ports)
-             connection_made = True
-        else:
-             # This case might occur if logic above is flawed, or unexpected drop type
-             print(f"Warning: Unhandled drop scenario in DropPortTreeWidget. Outputs={source_ports}, Inputs={target_ports}")
-             event.ignore()
-
-        # 5. Finalize
-        if connection_made:
-            event.acceptProposedAction()
-        else:
-            # This case should ideally not be reached if source/target ports are valid
-            event.ignore()
-
-        self.window().clear_drop_target_highlight(self)
-        self.current_drag_highlight_item = None
+        # Methods moved to PortTreeWidget base class
 
 class ConnectionView(QGraphicsView):
     def __init__(self, scene, parent=None):
@@ -1201,6 +976,1147 @@ def show_timed_messagebox(parent, icon, title, text, duration=1000):
     QTimer.singleShot(duration, msgBox.accept) # Close after duration
     msgBox.exec()
 
+# --- Helper Class for Tab UI Setup ---
+
+class TabUIManager:
+    def setup_port_tab(self, manager, tab_widget, tab_name, port_type):
+        layout = QVBoxLayout(tab_widget)
+        input_layout = QVBoxLayout()
+        output_layout = QVBoxLayout()
+        input_label = QLabel(f' {tab_name} Input Ports')
+        output_label = QLabel(f' {tab_name} Output Ports')
+
+        font = QFont()
+        font.setBold(True)
+        input_label.setFont(font)
+        output_label.setFont(font)
+        input_label.setStyleSheet(f"color: {manager.text_color.name()};")
+        output_label.setStyleSheet(f"color: {manager.text_color.name()};")
+
+        # Replace list widgets with tree widgets, passing the role
+        input_tree = DropPortTreeWidget(parent=tab_widget) # Role 'input' set in its __init__
+        output_tree = DragPortTreeWidget(parent=tab_widget) # Role 'output' set in its __init__
+        connection_scene = QGraphicsScene()
+        connection_view = ConnectionView(connection_scene)
+
+        input_tree.setStyleSheet(manager.list_stylesheet())
+        output_tree.setStyleSheet(manager.list_stylesheet())
+        connection_view.setStyleSheet(f"background: {manager.background_color.name()}; border: none;")
+
+        input_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
+        output_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
+
+        input_layout.addWidget(input_label)
+        input_layout.addWidget(input_tree)
+        # Input filter box (manager.input_filter_edit/manager.midi_input_filter_edit) created in __init__
+
+
+        output_layout.addWidget(output_label)
+        output_layout.addWidget(output_tree)
+        # Output filter box (manager.output_filter_edit/manager.midi_output_filter_edit) created in __init__
+
+
+        middle_layout = QVBoxLayout()
+        button_layout = QHBoxLayout() # Top buttons: Connect, Disconnect, Presets
+        connect_button = QPushButton('Connect')
+        connect_button.setToolTip("Connect selected ports (C)") # Add tooltip
+        disconnect_button = QPushButton('Disconnect')
+        disconnect_button.setToolTip("Disconnect selected ports (D or Delete)") # Add tooltip
+        # Presets button moved here from bottom layout
+        presets_button = QPushButton("Presets")
+        presets_button.setStyleSheet(manager.button_stylesheet())
+        presets_button.clicked.connect(manager.preset_handler._show_preset_menu) # Use PresetHandler
+        # Refresh button created but not added here (moved to bottom)
+        refresh_button = QPushButton('Refreh')
+
+        # Apply styles
+        for button in [connect_button, disconnect_button, presets_button, refresh_button]:
+             button.setStyleSheet(manager.button_stylesheet())
+
+        # Add buttons to top layout
+        button_layout.addWidget(connect_button)
+        button_layout.addWidget(disconnect_button)
+        button_layout.addWidget(presets_button) # Add presets button to top layout
+        middle_layout.addLayout(button_layout)
+        middle_layout.addWidget(connection_view)
+
+        middle_layout_widget = QWidget()
+        middle_layout_widget.setLayout(middle_layout)
+        middle_layout_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        middle_layout_widget.setFixedWidth(manager.initial_middle_width)
+
+        content_layout = QHBoxLayout()
+        content_layout.addLayout(output_layout)
+        content_layout.addWidget(middle_layout_widget)
+        content_layout.addLayout(input_layout)
+        layout.addLayout(content_layout)
+
+        if port_type == 'audio':
+            manager.input_tree = input_tree
+            manager.output_tree = output_tree
+            manager.connection_scene = connection_scene
+            manager.connection_view = connection_view
+            manager.connect_button = connect_button
+            manager.disconnect_button = disconnect_button
+            manager.refresh_button = refresh_button # Keep assignment for the bottom layout logic
+            manager.presets_button = presets_button # Assign presets button for audio tab
+            # References (manager.input_filter_edit, manager.output_filter_edit) created in __init__
+
+            input_tree.itemClicked.connect(manager.on_input_clicked)
+            output_tree.itemClicked.connect(manager.on_output_clicked)
+            connect_button.clicked.connect(manager.make_connection_selected)
+            disconnect_button.clicked.connect(manager.break_connection_selected)
+            refresh_button.clicked.connect(manager.refresh_ports)
+            # Connect filter signals using instance attributes to a new handler
+            # Disconnect previous connections first to avoid duplicates if setup is called multiple times (unlikely but safe)
+            try: manager.input_filter_edit.textChanged.disconnect()
+            except TypeError: pass # No connection existed
+            try: manager.output_filter_edit.textChanged.disconnect()
+            except TypeError: pass # No connection existed
+
+            manager.input_filter_edit.textChanged.connect(manager._handle_filter_change)
+            manager.output_filter_edit.textChanged.connect(manager._handle_filter_change)
+        elif port_type == 'midi':
+            manager.midi_input_tree = input_tree
+            manager.midi_output_tree = output_tree
+            manager.midi_connection_scene = connection_scene
+            manager.midi_connection_view = connection_view
+            manager.midi_connect_button = connect_button
+            manager.midi_disconnect_button = disconnect_button
+            manager.midi_refresh_button = refresh_button # Keep assignment for the bottom layout logic
+            manager.midi_presets_button = presets_button # Assign presets button for midi tab
+            # References (manager.midi_input_filter_edit, manager.midi_output_filter_edit) created in __init__
+
+            input_tree.itemClicked.connect(manager.on_midi_input_clicked)
+            output_tree.itemClicked.connect(manager.on_midi_output_clicked)
+            connect_button.clicked.connect(manager.make_midi_connection_selected)
+            disconnect_button.clicked.connect(manager.break_midi_connection_selected)
+            refresh_button.clicked.connect(manager.refresh_ports)
+            # Filter signals are connected in the 'audio' block to the shared handler
+
+        # Apply initial font size to the created trees
+        manager._apply_port_list_font_size()
+
+    def setup_pwtop_tab(self, manager, tab_widget):
+        """Set up the pw-top statistics tab"""
+        layout = QVBoxLayout(tab_widget)
+
+        # Create text display widget (still needed here)
+        pwtop_text_widget = QTextEdit()
+        pwtop_text_widget.setReadOnly(True)
+        pwtop_text_widget.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {manager.background_color.name()};
+                color: {manager.text_color.name()};
+                font-family: monospace;
+                font-size: 13pt;
+            }}
+        """)
+        layout.addWidget(pwtop_text_widget)
+
+        # Assign the widget to the manager for potential external access if needed later
+        manager.pwtop_text = pwtop_text_widget
+
+        # Instantiate PwTopMonitor and store it on the manager
+        manager.pwtop_monitor = PwTopMonitor(manager, pwtop_text_widget)
+
+    def setup_latency_tab(self, manager, tab_widget):
+        """Set up the Latency Test tab"""
+        layout = QVBoxLayout(tab_widget)
+
+        # --- Instantiate LatencyTester ---
+        manager.latency_tester = LatencyTester(manager)
+        # --- End Instantiate ---
+
+        # Instructions Label (Keep as is)
+        instructions_text = (
+            "<b>Instructions:</b><br><br>"
+            "1. Ensure 'jack_delay', 'jack-delay' or 'jack_iodelay' (via 'jack-example-tools') is installed.<br>"
+            "2. Physically connect an output and input of your audio interface using a cable (loopback).<br>"
+            "3. Select the corresponding Input (Capture) and Output (Playback) ports using the dropdowns below.<br>"
+            "4. Click 'Start Measurement'. The selected ports will be automatically connected to jack_delay.<br>"
+            "(you can click 'Start Measurement' first and then try different ports)<br>"
+            "5. <b><font color='orange'>Warning:</font></b> Start with low volume/gain levels on your interface "
+            "to avoid potential damage from the test signal.<br><br>"
+            "After the signal is detected, the average measured round-trip latency will be shown after 10 seconds.<br><br><br><br><br>"
+        )
+        instructions_label = QLabel(instructions_text)
+        instructions_label.setWordWrap(True)
+        instructions_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        instructions_label.setStyleSheet(f"color: {manager.text_color.name()}; font-size: 11pt;")
+        layout.addWidget(instructions_label)
+
+        # --- Combo Boxes for Port Selection (Assign to manager attributes as before) ---
+        manager.latency_input_combo = QComboBox()
+        manager.latency_input_combo.setPlaceholderText("Select Input (Capture)...")
+        manager.latency_input_combo.setStyleSheet(manager.list_stylesheet())
+
+        manager.latency_output_combo = QComboBox()
+        manager.latency_output_combo.setPlaceholderText("Select Output (Playback)...")
+        manager.latency_output_combo.setStyleSheet(manager.list_stylesheet())
+
+        # --- Refresh Button (Assign to manager attribute) ---
+        manager.latency_refresh_button = QPushButton("Refresh Ports")
+        manager.latency_refresh_button.setStyleSheet(manager.button_stylesheet())
+        # Connect to LatencyTester's method
+        manager.latency_refresh_button.clicked.connect(manager.latency_tester._populate_latency_combos)
+
+        # --- Combo Boxes Layout (Keep as is) ---
+        combo_box_container = QWidget()
+        combo_box_layout = QVBoxLayout(combo_box_container)
+        combo_box_layout.setContentsMargins(0, 0, 0, 0)
+        input_combo_layout = QHBoxLayout()
+        input_combo_layout.addWidget(manager.latency_input_combo)
+        input_combo_layout.addStretch(1)
+        combo_box_layout.addLayout(input_combo_layout)
+        output_combo_layout = QHBoxLayout()
+        output_combo_layout.addWidget(manager.latency_output_combo)
+        output_combo_layout.addStretch(1)
+        combo_box_layout.addLayout(output_combo_layout)
+        layout.addWidget(combo_box_container)
+
+        # --- Refresh Button Layout (Keep as is) ---
+        refresh_button_layout = QHBoxLayout()
+        refresh_button_layout.addWidget(manager.latency_refresh_button)
+        refresh_button_layout.addStretch(1)
+        layout.addLayout(refresh_button_layout)
+        layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
+
+        # --- Start/Stop Buttons Layout (Assign to manager attributes) ---
+        start_stop_button_layout = QHBoxLayout()
+        manager.latency_run_button = QPushButton('Start measurement')
+        manager.latency_run_button.setStyleSheet(manager.button_stylesheet())
+        # Connect to LatencyTester's method
+        manager.latency_run_button.clicked.connect(manager.latency_tester.run_latency_test)
+
+        manager.latency_stop_button = QPushButton('Stop')
+        manager.latency_stop_button.setStyleSheet(manager.button_stylesheet())
+        # Connect to LatencyTester's method
+        manager.latency_stop_button.clicked.connect(manager.latency_tester.stop_latency_test)
+        manager.latency_stop_button.setEnabled(False)
+
+        start_stop_button_layout.addWidget(manager.latency_run_button)
+        start_stop_button_layout.addWidget(manager.latency_stop_button)
+        start_stop_button_layout.addStretch(2)
+        layout.addLayout(start_stop_button_layout)
+
+        # Raw Output Toggle Checkbox (Assign to manager attribute)
+        manager.latency_raw_output_checkbox = QCheckBox("Show Raw Output (Continuous)")
+        manager.latency_raw_output_checkbox.setToolTip("If 'ON', measurement has to be stopped manually with 'Stop' button")
+        manager.latency_raw_output_checkbox.setStyleSheet(f"color: {manager.text_color.name()};")
+
+        # Results Text Edit (Assign to manager attribute)
+        manager.latency_results_text = QTextEdit()
+        manager.latency_results_text.setReadOnly(True)
+        manager.latency_results_text.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {manager.background_color.name()};
+                color: {manager.text_color.name()};
+                font-family: monospace;
+                font-size: 14pt;
+            }}
+        """)
+        manager.latency_results_text.setText("Ready to test.")
+        layout.addWidget(manager.latency_results_text, 1)
+        layout.addWidget(manager.latency_raw_output_checkbox) # Add checkbox below results
+
+        # Populate combo boxes using LatencyTester's method
+        manager.latency_tester._populate_latency_combos()
+
+        # Connect combo box signals to LatencyTester's methods
+        manager.latency_input_combo.currentIndexChanged.connect(manager.latency_tester._on_latency_input_selected)
+        manager.latency_output_combo.currentIndexChanged.connect(manager.latency_tester._on_latency_output_selected)
+
+# --- End Helper Class ---
+
+# --- Latency Tester Class ---
+class LatencyTester:
+    def __init__(self, manager):
+        self.manager = manager # Reference to JackConnectionManager
+        self.latency_process = None
+        self.latency_values = []
+        self.latency_timer = QTimer()
+        self.latency_waiting_for_connection = False # Flag to wait for connection
+        # Store selected physical port aliases for latency test
+        self.latency_selected_input_alias = None
+        self.latency_selected_output_alias = None
+
+        # Connect timer timeout signal internally
+        self.latency_timer.timeout.connect(self.stop_latency_test)
+
+    def run_latency_test(self):
+        """Starts the jack_delay process and timer."""
+        if self.latency_process is not None and self.latency_process.state() != QProcess.ProcessState.NotRunning:
+            self.manager.latency_results_text.append("Test already in progress.")
+            return
+
+        # Refresh combo boxes with latest ports
+        self._populate_latency_combos()
+
+        self.manager.latency_run_button.setEnabled(False)
+        self.manager.latency_stop_button.setEnabled(True) # Enable Stop button
+        self.manager.latency_results_text.clear() # Clear previous results/messages
+
+        if self.manager.latency_raw_output_checkbox.isChecked():
+             self.manager.latency_results_text.setText("Starting latency test (Raw Output)...\n"
+                                               "Select ports if not already selected.\n"
+                                               "Attempting auto-connection...\n")
+        else:
+             self.manager.latency_results_text.setText("Starting latency test (Average)...\n"
+                                               "Select ports if not already selected.\n"
+                                               "Attempting auto-connection...\n"
+                                               "Waiting for measurement signal...\n") # Updated message
+
+        self.latency_values = []
+        # Only wait for connection signal if NOT showing raw output
+        self.latency_waiting_for_connection = not self.manager.latency_raw_output_checkbox.isChecked()
+
+        self.latency_process = QProcess()
+        self.latency_process.readyReadStandardOutput.connect(self.handle_latency_output)
+        self.latency_process.finished.connect(self.handle_latency_finished)
+        self.latency_process.errorOccurred.connect(self.handle_latency_error)
+
+        # Determine command based on environment
+        if self.manager.flatpak_env:
+            program = "flatpak-spawn"
+            arguments = ["--host", "jack_delay"]
+        else:
+            # Try jack_delay first, then jack_iodelay as fallback
+            program = shutil.which("jack_delay")
+            if program is None:
+                program = shutil.which("jack_iodelay")
+
+            # If neither is found, show error and exit
+            if program is None:
+                 self.manager.latency_results_text.setText("Error: Neither 'jack_delay' nor 'jack_iodelay' found.\n"
+                                                   "Depending on your distribution, install jack-delay, jack_delay or jack-example-tools (jack_iodelay).")
+                 self.manager.latency_run_button.setEnabled(True)  # Re-enable run button
+                 self.manager.latency_stop_button.setEnabled(False) # Ensure stop is disabled
+                 self.latency_process = None # Clear the process object
+                 return # Stop execution
+
+            arguments = []
+
+        self.latency_process.setProgram(program) # Use the found program path
+        self.latency_process.setArguments(arguments)
+        self.latency_process.start() # Start the process
+        # Connection attempt is now triggered by _on_port_registered when jack_delay ports appear.
+
+    def handle_latency_output(self):
+        """Handles output from the jack_delay process."""
+        if self.latency_process is None:
+            return
+
+        data = self.latency_process.readAllStandardOutput().data().decode()
+
+        if self.manager.latency_raw_output_checkbox.isChecked():
+            # Raw output mode: Append data directly
+            self.manager.latency_results_text.moveCursor(QTextCursor.MoveOperation.End)
+            self.manager.latency_results_text.insertPlainText(data)
+            self.manager.latency_results_text.moveCursor(QTextCursor.MoveOperation.End)
+        else:
+            # Average calculation mode (original logic)
+            # Check if we are waiting for the connection signal
+            if self.latency_waiting_for_connection:
+                # Check if any line contains a latency measurement
+                if re.search(r'\d+\.\d+\s+ms', data):
+                    self.latency_waiting_for_connection = False
+                    self.manager.latency_results_text.setText("Connection detected. Running test...") # Changed message
+                    # Start the timer now
+                    self.latency_timer.setSingleShot(True)
+                    # self.latency_timer.timeout.connect(self.stop_latency_test) # Already connected in __init__
+                    self.latency_timer.start(10000) # 10 seconds
+
+            # If not waiting (or connection just detected), parse for values
+            if not self.latency_waiting_for_connection:
+                for line in data.splitlines():
+                    # Updated regex to capture both frames and ms
+                    match = re.search(r'(\d+\.\d+)\s+frames\s+(\d+\.\d+)\s+ms', line)
+                    if match:
+                        try:
+                            latency_frames = float(match.group(1))
+                            latency_ms = float(match.group(2))
+                            # Store both values as a tuple
+                            self.latency_values.append((latency_frames, latency_ms))
+                        except ValueError:
+                            pass # Ignore lines that don't parse correctly
+
+    def stop_latency_test(self):
+        """Stops the jack_delay process."""
+        if self.latency_timer.isActive():
+            self.latency_timer.stop() # Stop timer if called manually before timeout
+
+        if self.latency_process is not None and self.latency_process.state() != QProcess.ProcessState.NotRunning:
+            self.manager.latency_results_text.append("\nStopping test...")
+            self.latency_process.terminate()
+            # Give it a moment to terminate gracefully before potentially killing
+            if not self.latency_process.waitForFinished(500):
+                self.latency_process.kill()
+                self.latency_process.waitForFinished() # Wait for kill confirmation
+
+            self.latency_waiting_for_connection = False # Reset flag
+
+    def handle_latency_finished(self, exit_code, exit_status):
+        """Handles the jack_delay process finishing."""
+        # Clear previous text before showing final result
+        self.manager.latency_results_text.clear()
+
+        if self.manager.latency_raw_output_checkbox.isChecked():
+            # If raw output was shown, just indicate stop
+            self.manager.latency_results_text.setText("Measurement stopped.")
+        elif self.latency_values:
+            # Calculate average for frames and ms separately (only if not raw output)
+            total_frames = sum(val[0] for val in self.latency_values)
+            total_ms = sum(val[1] for val in self.latency_values)
+            count = len(self.latency_values)
+            average_frames = total_frames / count
+            average_ms = total_ms / count
+            # Display both average latencies
+            self.manager.latency_results_text.setText(f"Round-trip latency (average): {average_frames:.3f} frames / {average_ms:.3f} ms")
+        else:
+            # Check if the process exited normally but produced no values
+            if exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0:
+                 # Display a clear error message
+                 self.manager.latency_results_text.setText("No valid latency readings obtained. Check connections.")
+            elif exit_status == QProcess.ExitStatus.CrashExit:
+                 self.manager.latency_results_text.setText("Measurement stopped.")
+            # Error message handled by handle_latency_error if exit code != 0 and no values were found
+            elif exit_code != 0:
+                 # If an error occurred (handled by handle_latency_error),
+                 # ensure some message is shown if handle_latency_error didn't set one.
+                 if not self.manager.latency_results_text.toPlainText():
+                     self.manager.latency_results_text.setText(f"Test failed (Exit code: {exit_code}). Check connections.")
+            else: # Should not happen often, but catch other cases
+                 self.manager.latency_results_text.setText("Test finished without valid readings.")
+
+
+        self.latency_waiting_for_connection = False # Reset flag
+        self.manager.latency_run_button.setEnabled(True)
+        self.manager.latency_stop_button.setEnabled(False) # Disable Stop button
+        self.latency_process = None # Clear the process reference
+
+    def handle_latency_error(self, error):
+        """Handles errors occurring during the jack_delay process execution."""
+        error_string = self.latency_process.errorString() if self.latency_process else "Unknown error"
+        self.manager.latency_results_text.append(f"\nError running jack_delay: {error} - {error_string}")
+
+        # Ensure timer and process are stopped/cleaned up
+        if self.latency_timer.isActive():
+            self.latency_timer.stop()
+        if self.latency_process is not None:
+            # Ensure process is terminated if it hasn't finished yet
+            if self.latency_process.state() != QProcess.ProcessState.NotRunning:
+                self.latency_process.kill()
+                self.latency_process.waitForFinished()
+            self.latency_process = None
+
+        self.latency_waiting_for_connection = False # Reset flag
+        self.manager.latency_run_button.setEnabled(True)
+        self.manager.latency_stop_button.setEnabled(False) # Disable Stop button on error
+
+    def _populate_latency_combos(self):
+        """Populates the latency test combo boxes using python-jack."""
+        capture_ports = [] # Physical capture devices (JACK outputs)
+        playback_ports = [] # Physical playback devices (JACK inputs)
+        try:
+            # Get physical capture ports (System Output -> JACK Input)
+            jack_capture_ports = self.manager.client.get_ports(is_physical=True, is_audio=True, is_output=True)
+            capture_ports = sorted([port.name for port in jack_capture_ports])
+
+            # Get physical playback ports (System Input <- JACK Output)
+            jack_playback_ports = self.manager.client.get_ports(is_physical=True, is_audio=True, is_input=True)
+            playback_ports = sorted([port.name for port in jack_playback_ports])
+
+        except jack.JackError as e:
+            print(f"Error getting physical JACK ports: {e}")
+            # Optionally display an error in the UI
+
+        # Block signals while populating to avoid triggering handlers prematurely
+        self.manager.latency_input_combo.blockSignals(True)
+        self.manager.latency_output_combo.blockSignals(True)
+
+        # Clear existing items first, keeping placeholder
+        self.manager.latency_input_combo.clear()
+        self.manager.latency_output_combo.clear()
+        self.manager.latency_input_combo.addItem("Select Physical Input (Capture)...", None) # Add placeholder back
+        self.manager.latency_output_combo.addItem("Select Physical Output (Playback)...", None) # Add placeholder back
+
+        # Populate Input Combo (Capture Ports - JACK Outputs)
+        for port_name in capture_ports:
+            self.manager.latency_input_combo.addItem(port_name, port_name) # Use name for display and data
+
+        # Populate Output Combo (Playback Ports - JACK Inputs)
+        for port_name in playback_ports:
+            self.manager.latency_output_combo.addItem(port_name, port_name) # Use name for display and data
+
+        # Restore previous selection if port names still exist
+        if self.latency_selected_input_alias:
+            index = self.manager.latency_input_combo.findData(self.latency_selected_input_alias)
+            if index != -1:
+                self.manager.latency_input_combo.setCurrentIndex(index)
+        if self.latency_selected_output_alias:
+            index = self.manager.latency_output_combo.findData(self.latency_selected_output_alias)
+            if index != -1:
+                self.manager.latency_output_combo.setCurrentIndex(index)
+
+        # --- Set Output Combo Width to Match Input Combo Width ---
+        # Use sizeHint after population for a better estimate of required width.
+        input_width = self.manager.latency_input_combo.sizeHint().width()
+        if input_width > 0: # Ensure valid width before setting
+             # print(f"Setting latency_output_combo minimum width to: {input_width}") # Optional debug print
+             self.manager.latency_output_combo.setMinimumWidth(input_width)
+             # Ensure the output combo can expand horizontally if needed
+             output_policy = self.manager.latency_output_combo.sizePolicy()
+             # Using Expanding ensures it takes *at least* the input width, and can grow if layout dictates
+             output_policy.setHorizontalPolicy(QSizePolicy.Policy.Expanding)
+             self.manager.latency_output_combo.setSizePolicy(output_policy)
+        # --- End Width Setting ---
+
+        # Unblock signals
+        self.manager.latency_input_combo.blockSignals(False)
+        self.manager.latency_output_combo.blockSignals(False)
+
+
+    def _on_latency_input_selected(self, index):
+        """Stores the selected physical input port alias."""
+        self.latency_selected_input_alias = self.manager.latency_input_combo.itemData(index)
+        # Attempt connection if output is also selected and test is running
+        self._attempt_latency_auto_connection()
+
+    def _on_latency_output_selected(self, index):
+        """Stores the selected physical output port alias."""
+        self.latency_selected_output_alias = self.manager.latency_output_combo.itemData(index)
+        # Attempt connection if input is also selected and test is running
+        self._attempt_latency_auto_connection()
+
+    def _attempt_latency_auto_connection(self):
+        """Connects selected physical ports to jack_delay if ports are selected."""
+        # Only connect if both an input and output alias have been selected from the dropdowns.
+        # The call to this function is now triggered by jack_delay port registration.
+        if (self.latency_selected_input_alias and
+            self.latency_selected_output_alias):
+
+            # Pipewire 'in' direction (our output_ports list) connects to jack_delay:out
+            # Pipewire 'out' direction (our input_ports list) connects to jack_delay:in
+            output_to_connect = self.latency_selected_output_alias # This is the physical playback port alias
+            input_to_connect = self.latency_selected_input_alias   # This is the physical capture port alias
+
+            print(f"Attempting auto-connection: jack_delay:out -> {output_to_connect}")
+            print(f"Attempting auto-connection: {input_to_connect} -> jack_delay:in")
+
+            # Use the existing connection methods (ensure jack_delay ports exist first)
+            # We might need a small delay or check if jack_delay ports are ready.
+            # For now, let's assume they appear quickly after process start.
+            try:
+                # Connect jack_delay output to the selected physical playback port
+                # Ensure the target port exists before connecting
+                if any(p.name == output_to_connect for p in self.manager.client.get_ports(is_input=True, is_audio=True)):
+                     self.manager.make_connection("jack_delay:out", output_to_connect) # Use manager's method
+                else:
+                     print(f"Warning: Target output port '{output_to_connect}' not found.")
+
+                # Connect the selected physical capture port to jack_delay input
+                # Ensure the target port exists before connecting
+                if any(p.name == input_to_connect for p in self.manager.client.get_ports(is_output=True, is_audio=True)):
+                    self.manager.make_connection(input_to_connect, "jack_delay:in") # Use manager's method
+                else:
+                    print(f"Warning: Target input port '{input_to_connect}' not found.")
+
+                self.manager.latency_results_text.append("\nTry diffrent ports if you're seeing this message after clicking 'Start measurement button")
+                # Refresh the audio tab view to show the new connections
+                if self.manager.port_type == 'audio':
+                    self.manager.refresh_ports() # Use manager's method
+
+            except jack.JackError as e:
+                 # Catch specific Jack errors if needed, e.g., port not found
+                 print(f"Error during latency auto-connection (JackError): {e}")
+                 self.manager.latency_results_text.append(f"\nError auto-connecting (JACK): {e}")
+            except Exception as e:
+                print(f"Error during latency auto-connection: {e}")
+                self.manager.latency_results_text.append(f"\nError auto-connecting: {e}")
+
+# --- End Latency Tester Class ---
+
+
+# --- PwTop Monitor Class ---
+class PwTopMonitor:
+    def __init__(self, manager, pwtop_text_widget):
+        self.manager = manager # Keep reference if needed, e.g., for flatpak_env
+        self.pwtop_text = pwtop_text_widget
+        self.pw_process = None
+        self.pwtop_buffer = ""
+        self.last_complete_cycle = None
+        self.flatpak_env = manager.flatpak_env # Store flatpak_env directly
+
+    def start(self):
+        """Start the pw-top process in batch mode"""
+        if self.pw_process is None or self.pw_process.state() == QProcess.ProcessState.NotRunning:
+            self.pw_process = QProcess()
+
+            if self.flatpak_env:
+                self.pw_process.setProgram("flatpak-spawn")
+                self.pw_process.setArguments(["--host", "pw-top", "-b"])
+            else:
+                # Check if pw-top exists
+                pw_top_path = shutil.which("pw-top")
+                if not pw_top_path:
+                    self.pwtop_text.setText("Error: 'pw-top' command not found.\nPlease install pipewire-utils or equivalent.")
+                    self.pw_process = None # Ensure process is None if command not found
+                    return
+                self.pw_process.setProgram(pw_top_path)
+                self.pw_process.setArguments(["-b"])
+
+            self.pw_process.readyReadStandardOutput.connect(self.handle_pwtop_output)
+            self.pw_process.errorOccurred.connect(self.handle_pwtop_error)
+            self.pw_process.finished.connect(self.handle_pwtop_finished)
+            self.pw_process.start()
+            print("PwTopMonitor: Started pw-top process.") # Added log
+        else:
+            print("PwTopMonitor: pw-top process already running.") # Added log
+
+
+    def stop(self):
+        """Stop the pw-top process"""
+        if self.pw_process is not None and self.pw_process.state() != QProcess.ProcessState.NotRunning:
+            print("PwTopMonitor: Stopping pw-top process...") # Added log
+            # Close process standard I/O channels first
+            try:
+                self.pw_process.closeReadChannel(QProcess.ProcessChannel.StandardOutput)
+                self.pw_process.closeReadChannel(QProcess.ProcessChannel.StandardError)
+                self.pw_process.closeWriteChannel()
+            except Exception as e:
+                print(f"PwTopMonitor: Error closing process channels: {e}")
+
+            # Terminate gracefully first
+            self.pw_process.terminate()
+
+            # Give it some time to terminate gracefully
+            if not self.pw_process.waitForFinished(500): # Reduced wait time
+                print("PwTopMonitor: pw-top did not terminate gracefully, killing...") # Added log
+                # Force kill if it doesn't terminate
+                self.pw_process.kill()
+                self.pw_process.waitForFinished(500) # Wait for kill confirmation
+            print("PwTopMonitor: pw-top process stopped.") # Added log
+        else:
+             print("PwTopMonitor: stop() called but process was not running or None.") # Added log
+        self.pw_process = None # Ensure process reference is cleared
+
+
+    def handle_pwtop_output(self):
+        """Handle new output from pw-top"""
+        if self.pw_process is not None:
+            try:
+                data = self.pw_process.readAllStandardOutput().data().decode()
+                if data:
+                    # Append new data to buffer
+                    self.pwtop_buffer += data
+
+                    # Extract complete cycle
+                    complete_cycle = self.extract_latest_complete_cycle()
+
+                    # Update our stored complete cycle if we found a new one
+                    if complete_cycle:
+                        self.last_complete_cycle = complete_cycle
+
+                    # Always display the latest known complete cycle
+                    if self.last_complete_cycle:
+                        self.pwtop_text.setText(self.last_complete_cycle)
+                        # Keep cursor at the top to maintain stable view
+                        self.pwtop_text.verticalScrollBar().setValue(0)
+
+                    # Limit buffer size to prevent memory issues
+                    if len(self.pwtop_buffer) > 10000:
+                        self.pwtop_buffer = self.pwtop_buffer[-5000:]
+            except Exception as e:
+                print(f"PwTopMonitor: Error handling pw-top output: {e}")
+
+
+    def handle_pwtop_error(self, error):
+        """Handle pw-top process errors"""
+        error_string = "Unknown error"
+        if self.pw_process:
+            try:
+                error_string = self.pw_process.errorString()
+            except Exception as e:
+                 print(f"PwTopMonitor: Could not get error string: {e}")
+        print(f"PwTopMonitor: pw-top process error: {error} - {error_string}")
+        # Optionally display error in the text widget
+        self.pwtop_text.append(f"\nError running pw-top: {error_string}")
+
+
+    def handle_pwtop_finished(self, exit_code, exit_status):
+        """Handle pw-top process completion"""
+        status_str = "NormalExit" if exit_status == QProcess.ExitStatus.NormalExit else "CrashExit"
+        print(f"PwTopMonitor: pw-top process finished - Exit code: {exit_code}, Status: {status_str}")
+        # Optionally clear the text or show a message when stopped manually or if it crashes
+        # self.pwtop_text.append("\npw-top process finished.")
+
+
+    def extract_latest_complete_cycle(self):
+        """Extract the latest complete cycle from the pw-top output buffer"""
+        lines = self.pwtop_buffer.split('\n')
+
+        # Find all lines that start with 'S' and contain 'ID' and 'NAME'
+        header_indices = [
+            i for i, line in enumerate(lines)
+            if line.startswith('S') and 'ID' in line and 'NAME' in line
+        ]
+
+        # Keep buffer size manageable by removing old data
+        if len(header_indices) > 2:
+            keep_from_line = header_indices[-2]  # Keep last 2 cycles
+            self.pwtop_buffer = '\n'.join(lines[keep_from_line:])
+            # Re-calculate header indices for the trimmed buffer
+            lines = self.pwtop_buffer.split('\n')
+            header_indices = [
+                i for i, line in enumerate(lines)
+                if line.startswith('S') and 'ID' in line and 'NAME' in line
+            ]
+
+
+        # Need at least 2 headers to identify a complete cycle
+        if len(header_indices) < 2:
+            return None
+
+        # Extract section between last two headers
+        start_idx = header_indices[-2]
+        end_idx = header_indices[-1]
+        section = lines[start_idx:end_idx]
+
+        # Basic validation - should have some minimum content
+        if len(section) < 3:
+            return None
+
+        return '\n'.join(section)
+
+# --- End PwTop Monitor Class ---
+
+
+# --- Preset Handler Class ---
+class PresetHandler:
+    def __init__(self, manager):
+        self.manager = manager # Reference to JackConnectionManager
+        # Initialize preset state from config manager
+        self.startup_preset_name = self.manager.config_manager.get_str('startup_preset')
+        # Initialize current_preset_name based on the last run's active preset
+        self.current_preset_name = self.manager.config_manager.get_str('active_preset')
+        # Temporary attribute for the save preset name line edit in the menu
+        self._preset_menu_name_edit = None
+
+    def _show_preset_menu(self):
+        """Creates and shows the preset management menu."""
+        menu = QMenu(self.manager) # Parent is the main window
+        preset_names = self.manager.preset_manager.get_preset_names()
+
+        # --- Save Section ---
+        # Use a temporary attribute to hold the line edit for the save action
+        self._preset_menu_name_edit = QLineEdit()
+        self._preset_menu_name_edit.setPlaceholderText("Enter New Preset Name...")
+        self._preset_menu_name_edit.returnPressed.connect(self._save_current_preset_from_menu) # Connect Enter key
+        self._preset_menu_name_edit.setMinimumWidth(200) # Give it some space
+        # Apply similar styling as filter edits
+        filter_style = f"""
+            QLineEdit {{
+                background-color: {self.manager.background_color.name()};
+                color: {self.manager.text_color.name()};
+                border: 1px solid {self.manager.text_color.name()};
+                padding: 2px;
+                border-radius: 3px;
+            }}
+        """
+        self._preset_menu_name_edit.setStyleSheet(filter_style)
+
+        name_action = QWidgetAction(menu)
+        name_action.setDefaultWidget(self._preset_menu_name_edit)
+        menu.addAction(name_action)
+
+        save_action = QAction("Save Current as New Preset", menu)
+        save_action.triggered.connect(self._save_current_preset_from_menu)
+        menu.addAction(save_action)
+
+        # --- Add "Save" action for currently loaded preset ---
+        save_loaded_action = QAction("Save", menu)
+        save_loaded_action.setShortcut(QKeySequence("Ctrl+S"))
+        save_loaded_action.setEnabled(bool(self.current_preset_name))
+        save_loaded_action.triggered.connect(self._save_current_loaded_preset)
+        menu.addAction(save_loaded_action)
+        # --- End Add "Save" action ---
+
+        menu.addSeparator()
+
+        # --- Load Section ---
+        load_menu = menu.addMenu("Load Preset") # Create menu even if no presets exist
+
+        # Add "Default" option at the top
+        default_action = QAction("Default", load_menu)
+        default_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        default_action.triggered.connect(self._handle_default_preset_action)
+        load_menu.addAction(default_action)
+        load_menu.addSeparator() # Add separator after "Default"
+
+        if preset_names:
+            for name in preset_names:
+                load_action = QAction(name, load_menu)
+                # Highlight if this is the currently active preset
+                # Compare with self.current_preset_name (initialized from config)
+                if name == self.current_preset_name:
+                    font = load_action.font()
+                    font.setBold(True)
+                    load_action.setFont(font)
+                # Use lambda to capture the correct name and call the new handler
+                load_action.triggered.connect(lambda checked=False, n=name: self._handle_gui_preset_load(n))
+                load_menu.addAction(load_action)
+        else:
+            no_load_action = QAction("No Saved Presets", menu)
+            no_load_action.setEnabled(False)
+            menu.addAction(no_load_action)
+
+        # --- Delete Section ---
+        if preset_names:
+            menu.addSeparator()
+            delete_menu = menu.addMenu("Delete Preset")
+            for name in preset_names:
+                delete_action = QAction(name, delete_menu)
+                # Use lambda to capture the correct name for the slot
+                delete_action.triggered.connect(lambda checked=False, n=name: self._delete_selected_preset(n))
+                delete_menu.addAction(delete_action)
+
+        # --- Startup Preset Section ---
+        menu.addSeparator()
+        startup_menu = menu.addMenu("Preset to load at (auto)start")
+        startup_group = QActionGroup(startup_menu) # Use QActionGroup for exclusivity
+        startup_group.setExclusive(True)
+
+        # Add "None" option
+        none_action = QAction("None", startup_menu)
+        none_action.setCheckable(True)
+        none_action.setChecked(not self.startup_preset_name or self.startup_preset_name == 'None')
+        none_action.triggered.connect(lambda checked=False: self._set_startup_preset(None))
+        startup_menu.addAction(none_action)
+        startup_group.addAction(none_action) # Add to group
+        startup_menu.addSeparator() # Add spacer after 'None'
+
+        # Add existing presets
+        for name in preset_names:
+            startup_action = QAction(name, startup_menu)
+            startup_action.setCheckable(True)
+            startup_action.setChecked(name == self.startup_preset_name)
+            # Use lambda to capture the correct name
+            startup_action.triggered.connect(lambda checked=False, n=name: self._set_startup_preset(n))
+            startup_menu.addAction(startup_action)
+            startup_group.addAction(startup_action) # Add to group
+
+        # Show the menu at the presets button position (use the button from the manager)
+        # Determine which button to use based on current tab
+        current_tab_index = self.manager.tab_widget.currentIndex()
+        button_to_use = self.manager.presets_button if current_tab_index == 0 else self.manager.midi_presets_button
+
+        if button_to_use: # Check if the button exists for the current tab
+             presets_button_pos = button_to_use.mapToGlobal(QPoint(0, button_to_use.height()))
+             menu.exec(presets_button_pos)
+        else:
+             print("Warning: Could not find presets button for the current tab to show menu.")
+
+
+        # Clean up reference to the line edit after the menu is closed
+        self._preset_menu_name_edit = None
+
+
+    def _save_current_preset_from_menu(self):
+        """Saves the current connections using the name from the menu's line edit."""
+        # Retrieve name from the temporary attribute holding the QLineEdit
+        if not self._preset_menu_name_edit: # Safety check
+            print("Error: Preset menu name edit not found.")
+            return
+        preset_name = self._preset_menu_name_edit.text().strip()
+        if not preset_name:
+            QMessageBox.warning(self.manager, "Save Preset", "Enter a name for the preset.")
+            return
+
+        current_connections = self.manager._get_current_connections()
+        if not current_connections:
+             QMessageBox.information(self.manager, "Save Preset", "No connections to save.")
+             return
+
+        if self.manager.preset_manager.save_preset(preset_name, current_connections, self.manager): # Pass manager as parent_widget
+            print(f"Preset '{preset_name}' saved.")
+            show_timed_messagebox(self.manager, QMessageBox.Icon.Information, "Preset Saved", f"Preset '{preset_name}' saved successfully.")
+   #     else:
+    #        QMessageBox.critical(self.manager, "Save Preset", f"Failed to save preset '{preset_name}'.")
+
+
+    def _set_startup_preset(self, name):
+       """Sets the selected preset name as the startup preset in the config."""
+       print(f"Setting startup preset to: {name}")
+       self.startup_preset_name = name # Update internal state
+       # Save the actual preset name, or None (which ConfigManager saves as empty string)
+       self.manager.config_manager.set_str('startup_preset', name)
+       # No need to update menu check state here as it's closed
+
+    def _load_selected_preset(self, name, is_startup=False):
+        """Loads the connections from the selected preset.
+        Updates self.current_preset_name and returns True on success, False otherwise.
+        is_startup flag prevents showing success message on startup load."""
+        print(f"Loading preset: {name}")
+        preset_connections = self.manager.preset_manager.get_preset(name)
+        if preset_connections is None:
+            if not is_startup: # Only show message box in GUI mode
+                QMessageBox.critical(self.manager, "Load Preset", f"Could not find preset '{name}'.")
+            else:
+                print(f"Error: Could not find preset '{name}'.")
+            self.current_preset_name = None # Clear preset name on failure
+            self.manager.config_manager.set_str('active_preset', None) # Clear in config too
+            if hasattr(self.manager, 'save_preset_action'): # Disable global save shortcut
+                self.manager.save_preset_action.setEnabled(False)
+            print("Load Fail: Cleared active_preset in config.")
+            return False # Indicate failure
+
+        # 1. Get current connections
+        current_connections = self.manager._get_current_connections()
+
+        # 2. Disconnect all current connections
+        print("Disconnecting existing connections...")
+        connections_to_restore_on_error = [] # Keep track if disconnect fails mid-way
+        try:
+            for conn in current_connections:
+                conn_type = conn.get("type", "audio") # Default to audio if type missing
+                output_name = conn.get("output")
+                input_name = conn.get("input")
+                if output_name and input_name:
+                    connections_to_restore_on_error.append(conn) # Add before attempting disconnect
+                    print(f"  Disconnecting {output_name} -> {input_name} ({conn_type})")
+                    if conn_type == "midi":
+                        self.manager.client.disconnect(output_name, input_name)
+                    else:
+                        self.manager.client.disconnect(output_name, input_name)
+                    # Remove from restore list on success
+                    connections_to_restore_on_error.pop()
+        except jack.JackError as e:
+            print(f"Error during disconnection phase: {e}. Attempting to restore...")
+            # Attempt to restore connections that were successfully disconnected before the error
+            for restore_conn in connections_to_restore_on_error:
+                try:
+                    self.manager.client.connect(restore_conn["output"], restore_conn["input"])
+                except jack.JackError: pass # Ignore restore errors
+            if not is_startup:
+                QMessageBox.warning(self.manager, "Load Preset Error", f"An error occurred disconnecting existing connections: {e}\nPreset loading aborted.")
+            else:
+                print(f"Error during disconnection phase: {e}. Preset loading aborted.")
+            self.manager.refresh_ports() # Refresh UI to show potentially restored state
+            self.current_preset_name = None # Clear preset name on failure
+            self.manager.config_manager.set_str('active_preset', None) # Clear in config too
+            if hasattr(self.manager, 'save_preset_action'): # Disable global save shortcut
+                self.manager.save_preset_action.setEnabled(False)
+            print("Load Fail (Disconnect): Cleared active_preset in config.")
+            return False # Indicate failure
+        except Exception as e: # Catch other potential errors
+            print(f"Unexpected error during disconnection: {e}")
+            if not is_startup:
+                QMessageBox.critical(self.manager, "Load Preset Error", f"An unexpected error occurred during disconnection: {e}\nPreset loading aborted.")
+            else:
+                print(f"Unexpected error during disconnection: {e}. Preset loading aborted.")
+            self.manager.refresh_ports()
+            self.current_preset_name = None # Clear preset name on failure
+            self.manager.config_manager.set_str('active_preset', None) # Clear in config too
+            if hasattr(self.manager, 'save_preset_action'): # Disable global save shortcut
+                self.manager.save_preset_action.setEnabled(False)
+            print("Load Fail (Disconnect Exception): Cleared active_preset in config.")
+            return False # Indicate failure
+
+        # 3. Connect preset connections
+        print(f"Connecting preset '{name}' connections...")
+        connections_made = []
+        errors_occurred = False
+        try:
+            for conn in preset_connections:
+                conn_type = conn.get("type", "audio")
+                output_name = conn.get("output")
+                input_name = conn.get("input")
+                if output_name and input_name:
+                    try:
+                        print(f"  Connecting {output_name} -> {input_name} ({conn_type})")
+                        # Check if ports exist before connecting
+                        # Note: This adds overhead but prevents JackErrors for non-existent ports
+                        out_port_exists = any(p.name == output_name for p in self.manager.client.get_ports(is_output=True, is_midi=(conn_type == "midi")))
+                        in_port_exists = any(p.name == input_name for p in self.manager.client.get_ports(is_input=True, is_midi=(conn_type == "midi")))
+
+                        if out_port_exists and in_port_exists:
+                            if conn_type == "midi":
+                                self.manager.client.connect(output_name, input_name)
+                            else:
+                                self.manager.client.connect(output_name, input_name)
+                            connections_made.append(conn) # Track successful connections
+                        else:
+                            print(f"    Skipping connection: Port(s) not found (Output: {out_port_exists}, Input: {in_port_exists})")
+                            errors_occurred = True # Flag that some connections were skipped
+
+                    except jack.JackError as e:
+                        print(f"    Error connecting {output_name} -> {input_name}: {e}")
+                        errors_occurred = True # Flag that errors occurred
+                        # Continue to the next connection (original behavior)
+                    except Exception as e: # Catch other potential errors
+                        print(f"    Unexpected error connecting {output_name} -> {input_name}: {e}")
+                        errors_occurred = True
+                        # Continue to the next connection
+
+        except Exception as e: # Catch broader errors during the connection loop setup itself (e.g., iterating preset_connections)
+            print(f"Unexpected error during connection phase setup: {e}")
+            if not is_startup:
+                QMessageBox.critical(self.manager, "Load Preset Error", f"An unexpected error occurred during connection phase: {e}\nPreset loading failed.")
+            else:
+                print(f"Unexpected error during connection phase: {e}. Preset loading failed.")
+            self.manager.refresh_ports()
+            self.current_preset_name = None # Clear preset name on failure
+            self.manager.config_manager.set_str('active_preset', None) # Clear in config too
+            if hasattr(self.manager, 'save_preset_action'): # Disable global save shortcut
+                self.manager.save_preset_action.setEnabled(False)
+            print("Load Fail (Connect Exception): Cleared active_preset in config.")
+            return False # Indicate failure - This was a setup error, not a connection error
+
+        # 4. Refresh UI and update state
+        print("Preset load complete. Refreshing UI.")
+        self.current_preset_name = name # Set the current preset name on success/partial success
+        self.manager.config_manager.set_str('active_preset', name) # Save to config on success
+        if hasattr(self.manager, 'save_preset_action'): # Enable global save shortcut
+            self.manager.save_preset_action.setEnabled(True)
+        print(f"Load Success: Set active_preset in config to '{name}'")
+        self.manager.refresh_ports() # This updates visuals and button states
+
+        if errors_occurred:
+             # Only show message if not loading at startup
+             if not is_startup:
+                  QMessageBox.information(self.manager, "Load Preset", f"Preset '{name}' loaded, but some connections could not be made (ports might be missing).")
+        else:
+             # Only show message if not loading at startup
+             if not is_startup:
+                  show_timed_messagebox(self.manager, QMessageBox.Icon.Information, "Load Preset", f"Preset '{name}' loaded successfully.")
+
+        return True # Indicate success
+
+    def _delete_selected_preset(self, name):
+        """Deletes the selected preset after confirmation."""
+        reply = QMessageBox.question(self.manager, 'Delete Preset',
+                                     f"Are you sure you want to delete the preset '{name}'?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            if self.manager.preset_manager.delete_preset(name):
+                print(f"Preset '{name}' deleted.")
+                show_timed_messagebox(self.manager, QMessageBox.Icon.Information, "Preset Deleted", f"Preset '{name}' deleted.")
+                # If the deleted preset was the current one, clear it
+                if name == self.current_preset_name:
+                    self.current_preset_name = None
+                    self.manager.config_manager.set_str('active_preset', None)
+                    if hasattr(self.manager, 'save_preset_action'): # Disable global save shortcut
+                        self.manager.save_preset_action.setEnabled(False)
+                    print("Cleared active_preset in config as current preset was deleted.")
+                # If the deleted preset was the startup one, clear it
+                if name == self.startup_preset_name:
+                    self.startup_preset_name = None
+                    self.manager.config_manager.set_str('startup_preset', None)
+                    print("Cleared startup_preset in config as it was deleted.")
+            else:
+                QMessageBox.warning(self.manager, "Delete Preset", f"Could not find or delete preset '{name}'.")
+
+    def _handle_gui_preset_load(self, name):
+        """Handles loading a preset via the GUI menu click."""
+        success = self._load_selected_preset(name) # This updates self.current_preset_name and saves config
+        # No extra config saving needed here, _load_selected_preset handles it
+        # No need to manually update menu bolding here, it happens next time menu is opened.
+
+    def _handle_default_preset_action(self):
+        """Handles the 'Default' preset action: disconnects all connections, then restarts the session manager."""
+        reply = QMessageBox.question(self.manager, 'Confirm Reset',
+                                     "This will disconnect all current connections and then restart WirePlumber"
+                                     " to restore default connections.\n\n"
+                                     "Do you want to proceed?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No) # Default to No
+
+        if reply == QMessageBox.StandardButton.Yes:
+            print("User confirmed default connection reset.")
+
+            # --- Step 1: Disconnect All Connections ---
+            print("Step 1: Disconnecting all existing JACK connections...")
+            current_connections = self.manager._get_current_connections()
+            disconnect_errors = []
+            disconnected_count = 0
+
+            if current_connections:
+                for conn in current_connections:
+                    output_name = conn.get("output")
+                    input_name = conn.get("input")
+                    if output_name and input_name:
+                        try:
+                            # print(f"  Disconnecting {output_name} -> {input_name}") # Verbose logging
+                            self.manager.client.disconnect(output_name, input_name)
+                            disconnected_count += 1
+                        except jack.JackError as e:
+                            print(f"    Warning: Could not disconnect {output_name} -> {input_name}: {e}")
+                        except Exception as e:
+                             print(f"    Unexpected error disconnecting {output_name} -> {input_name}: {e}")
+                             disconnect_errors.append(f"{output_name} -> {input_name}: {e}")
+                print(f"Step 1: Disconnected {disconnected_count} connections.")
+                if disconnect_errors:
+                    print(f"Step 1: Encountered unexpected errors during disconnection: {disconnect_errors}")
+            else:
+                print("Step 1: No active JACK connections found to disconnect.")
+
+            # --- Step 2: Restart Session Manager ---
+            print("Step 2: Restarting PipeWire session manager...")
+            service_name = "wireplumber.service" # Default to WirePlumber
+            command = []
+            if self.manager.flatpak_env:
+                print(f"  Running in Flatpak environment. Using flatpak-spawn to restart {service_name}.")
+                command = ["flatpak-spawn", "--host", "systemctl", "restart", "--user", service_name]
+            else:
+                print(f"  Running outside Flatpak environment. Using systemctl to restart {service_name}.")
+                command = ["systemctl", "restart", "--user", service_name]
+
+            print(f"  Executing command: {' '.join(command)}")
+            success = QProcess.startDetached(command[0], command[1:])
+
+            # --- Finalization ---
+            # Clear the active preset regardless of restart success
+            self.manager.config_manager.set_str('active_preset', None)
+            self.current_preset_name = None
+            if hasattr(self.manager, 'save_preset_action'): # Disable global save shortcut
+                self.manager.save_preset_action.setEnabled(False)
+            print("Cleared active_preset in config after selecting 'Default'.")
+
+            if success:
+                print("Step 2: Session manager restart command initiated successfully.")
+                show_timed_messagebox(self.manager, QMessageBox.Icon.Information, "Resetting Connections",
+                                      f"Disconnected {disconnected_count} connections.\nSession manager ({service_name}) restart initiated.", 2500)
+                # Trigger a refresh after a delay to allow session manager to restart and apply defaults
+                QTimer.singleShot(2000, self.manager.refresh_ports) # Increased delay slightly
+            else:
+                error_message = f"Failed to execute session manager restart command: {' '.join(command)}\n\n" \
+                                f"Connections were disconnected, but defaults may not be restored.\n" \
+                                f"If you are not using WirePlumber, you might need to manually restart your session manager (e.g., pipewire-media-session.service)."
+                print(error_message)
+                QMessageBox.critical(self.manager, "Reset Error", error_message)
+                # Refresh immediately to show the disconnected state
+                self.manager.refresh_ports()
+
+    def _save_current_loaded_preset(self):
+        """Saves the current connections to the currently loaded preset file without confirmation."""
+        if not self.current_preset_name:
+            QMessageBox.warning(self.manager, "Save Preset Error", "No preset is currently loaded.")
+            return
+
+        preset_name = self.current_preset_name
+        print(f"Saving current connections to loaded preset: '{preset_name}'")
+        current_connections = self.manager._get_current_connections()
+        # Pass confirm_overwrite=False to skip the dialog
+        if self.manager.preset_manager.save_preset(preset_name, current_connections, parent_widget=self.manager, confirm_overwrite=False):
+            print(f"Preset '{preset_name}' saved.")
+            show_timed_messagebox(self.manager, QMessageBox.Icon.Information, "Preset Saved", f"Preset '{preset_name}' saved successfully.")
+        # No else needed, save_preset shows critical error message on failure
+
+# --- End Preset Handler Class ---
+
 
 class JackConnectionManager(QMainWindow):
     # PyQt signals for port registration events
@@ -1211,15 +2127,14 @@ class JackConnectionManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
-        self.preset_manager = PresetManager() # <-- Instantiate PresetManager
+        self.preset_manager = PresetManager() # Instantiate PresetManager
+        self.preset_handler = PresetHandler(self) # Instantiate PresetHandler
         self.untangle_mode = self.config_manager.get_int('untangle_mode', 0) # Initialize untangle mode early
         self.untangle_button = None # Initialize button attribute
-        self.startup_preset_name = self.config_manager.get_str('startup_preset') # Load startup preset name
-        # --- Read active preset from config ---
-        self.active_preset_name_from_config = self.config_manager.get_str('active_preset')
-        # Initialize current_preset_name based on the last run's active preset
-        self.current_preset_name = self.active_preset_name_from_config # Track the currently loaded preset
-        # --- End read active preset ---
+        # Preset state (startup_preset_name, current_preset_name) is now managed by self.preset_handler
+        # --- Read last active tab from config ---
+        self.last_active_tab = self.config_manager.get_int('last_active_tab', 0)
+        # --- End read last active tab ---
         self.minimize_on_close = True
         # ... (rest of __init__ remains largely the same for now) ...
         self.setWindowTitle('Cables')
@@ -1245,8 +2160,10 @@ class JackConnectionManager(QMainWindow):
         # Create filter edit widgets (will be placed in bottom layout later)
         self.output_filter_edit = QLineEdit()
         self.output_filter_edit.setPlaceholderText("Filter outputs...")
+        self.output_filter_edit.setToolTip("Use '-' prefix for exclusive filtering")
         self.input_filter_edit = QLineEdit()
         self.input_filter_edit.setPlaceholderText("Filter inputs...")
+        self.input_filter_edit.setToolTip("Use '-' prefix for exclusive filtering")
         # Removed redundant MIDI filter edits - use the main ones above
 
         # Set up JACK port registration callbacks
@@ -1259,20 +2176,15 @@ class JackConnectionManager(QMainWindow):
         # Detect Flatpak environment
         self.flatpak_env = os.path.exists('/.flatpak-info')
 
-        # Initialize process for pw-top and output buffer
-        self.pw_process = None
-        self.pwtop_buffer = ""  # Buffer to store pw-top output
-        self.last_complete_cycle = None  # Store last complete cycle
+        # pw-top related attributes moved to PwTopMonitor
 
-        # Latency test variables
-        self.latency_process = None
-        self.latency_values = []
-        self.latency_timer = QTimer()
-        self.latency_waiting_for_connection = False # Flag to wait for connection
-        # Store selected physical port aliases for latency test
-        self.latency_selected_input_alias = None
-        self.latency_selected_output_alias = None
+        self.pwtop_monitor = None # Initialize pwtop_monitor attribute
+        self.latency_tester = None # Instantiated in setup_latency_tab
         # self.current_preset_name = None # Track the currently loaded preset - Initialized from config now
+        # --- Initialize shortcut actions ---
+        self.save_preset_action = None
+        self.default_preset_action = None
+        # --- End Initialize shortcut actions ---
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -1286,16 +2198,28 @@ class JackConnectionManager(QMainWindow):
         self.pwtop_tab_widget = QWidget()
         self.latency_tab_widget = QWidget() # Added Latency Tab Widget
 
-        self.setup_port_tab(self.audio_tab_widget, "Audio", 'audio')
-        self.setup_port_tab(self.midi_tab_widget, "MIDI", 'midi')
-        self.setup_pwtop_tab(self.pwtop_tab_widget)
-        self.setup_latency_tab(self.latency_tab_widget) # Added call to setup latency tab
+        # Instantiate the helper class
+        self.tab_ui_manager = TabUIManager()
+
+        # Call setup methods from the helper class, passing self (manager)
+        self.tab_ui_manager.setup_port_tab(self, self.audio_tab_widget, "Audio", 'audio')
+        self.tab_ui_manager.setup_port_tab(self, self.midi_tab_widget, "MIDI", 'midi')
+        self.tab_ui_manager.setup_pwtop_tab(self, self.pwtop_tab_widget)
+        self.tab_ui_manager.setup_latency_tab(self, self.latency_tab_widget) # Added call to setup latency tab
 
         self.tab_widget.addTab(self.audio_tab_widget, "Audio")
         self.tab_widget.addTab(self.midi_tab_widget, "MIDI")
         self.tab_widget.addTab(self.pwtop_tab_widget, "pw-top")
         self.tab_widget.addTab(self.latency_tab_widget, "Latency Test") # Added Latency Tab
+        
+        # Set the active tab based on the saved value
+        if 0 <= self.last_active_tab < self.tab_widget.count():
+            self.tab_widget.setCurrentIndex(self.last_active_tab)
         self.tab_widget.currentChanged.connect(self.switch_tab)
+        
+        # Explicitly call switch_tab for the initial index to ensure setup runs
+        # This handles starting pw-top if the initial tab is index 2
+        self.switch_tab(self.tab_widget.currentIndex())
 
         self.setup_bottom_layout(main_layout) # <-- Preset button will be added here later
 
@@ -1312,8 +2236,14 @@ class JackConnectionManager(QMainWindow):
         # Start the rapid refresh sequence immediately
         # self.start_startup_refresh() # Don't start automatically, will be triggered in main()
 
-        # Setup keyboard shortcuts
+        # Define actions first
+        self._setup_actions()
+        # Then add them via setup_shortcuts
         self.setup_shortcuts()
+
+        # Set initial state for the global save shortcut based on loaded preset
+        if self.save_preset_action:
+            self.save_preset_action.setEnabled(bool(self.preset_handler.current_preset_name))
 
     def start_startup_refresh(self):
         """Start the rapid refresh sequence on startup"""
@@ -1350,665 +2280,9 @@ class JackConnectionManager(QMainWindow):
 
             # Preset loading is now handled exclusively in main() for headless mode
 
-    def setup_pwtop_tab(self, tab_widget):
-        """Set up the pw-top statistics tab"""
-        layout = QVBoxLayout(tab_widget)
-
-        # Create text display widget
-        self.pwtop_text = QTextEdit()
-        self.pwtop_text.setReadOnly(True)
-        self.pwtop_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {self.background_color.name()};
-                color: {self.text_color.name()};
-                font-family: monospace;
-                font-size: 13pt;
-            }}
-        """)
-
-        layout.addWidget(self.pwtop_text)
-        # pw-top process will be started when the tab is selected
-    def start_pwtop_process(self):
-        """Start the pw-top process in batch mode"""
-        if self.pw_process is None:
-            self.pw_process = QProcess()
-
-            if self.flatpak_env:
-                self.pw_process.setProgram("flatpak-spawn")
-                self.pw_process.setArguments(["--host", "pw-top", "-b"])
-            else:
-                self.pw_process.setProgram("pw-top")
-                self.pw_process.setArguments(["-b"])
-
-            self.pw_process.readyReadStandardOutput.connect(self.handle_pwtop_output)
-            self.pw_process.errorOccurred.connect(self.handle_pwtop_error)
-            self.pw_process.finished.connect(self.handle_pwtop_finished)
-            self.pw_process.start()
-
-    def stop_pwtop_process(self):
-        """Stop the pw-top process"""
-        if self.pw_process is not None:
-            # Close process standard I/O channels
-            self.pw_process.closeReadChannel(QProcess.ProcessChannel.StandardOutput)
-            self.pw_process.closeReadChannel(QProcess.ProcessChannel.StandardError)
-            self.pw_process.closeWriteChannel()
-
-            # Terminate gracefully first
-            self.pw_process.terminate()
-
-            # Give it some time to terminate gracefully
-            if not self.pw_process.waitForFinished(1000):
-                # Force kill if it doesn't terminate
-                self.pw_process.kill()
-                self.pw_process.waitForFinished()
-            self.pw_process = None
-
-    def handle_pwtop_output(self):
-        """Handle new output from pw-top"""
-        if self.pw_process is not None:
-            data = self.pw_process.readAllStandardOutput().data().decode()
-            if data:
-                # Append new data to buffer
-                self.pwtop_buffer += data
-
-                # Extract complete cycle
-                complete_cycle = self.extract_latest_complete_cycle()
-
-                # Update our stored complete cycle if we found a new one
-                if complete_cycle:
-                    self.last_complete_cycle = complete_cycle
-
-                # Always display the latest known complete cycle
-                if self.last_complete_cycle:
-                    self.pwtop_text.setText(self.last_complete_cycle)
-                    # Keep cursor at the top to maintain stable view
-                    self.pwtop_text.verticalScrollBar().setValue(0)
-
-                # Limit buffer size to prevent memory issues
-                if len(self.pwtop_buffer) > 10000:
-                    self.pwtop_buffer = self.pwtop_buffer[-5000:]
-
-    def handle_pwtop_error(self, error):
-        """Handle pw-top process errors"""
-        print(f"pw-top process error: {error}")
-
-    def handle_pwtop_finished(self, exit_code, exit_status):
-        """Handle pw-top process completion"""
-        print(f"pw-top process finished - Exit code: {exit_code}, Status: {exit_status}")
-
-    def extract_latest_complete_cycle(self):
-        """Extract the latest complete cycle from the pw-top output buffer"""
-        lines = self.pwtop_buffer.split('\n')
-
-        # Find all lines that start with 'S' and contain 'ID' and 'NAME'
-        header_indices = [
-            i for i, line in enumerate(lines)
-            if line.startswith('S') and 'ID' in line and 'NAME' in line
-        ]
-
-        # Keep buffer size manageable by removing old data
-        if len(header_indices) > 2:
-            keep_from_line = header_indices[-2]  # Keep last 2 cycles
-            self.pwtop_buffer = '\n'.join(lines[keep_from_line:])
-
-        # Need at least 2 headers to identify a complete cycle
-        if len(header_indices) < 2:
-            return None
-
-        # Extract section between last two headers
-        start_idx = header_indices[-2]
-        end_idx = header_indices[-1]
-        section = lines[start_idx:end_idx]
-
-        # Basic validation - should have some minimum content
-        if len(section) < 3:
-            return None
-
-        return '\n'.join(section)
-
-    # --- Latency Test Methods ---
-
-    def run_latency_test(self):
-        """Starts the jack_delay process and timer."""
-        if self.latency_process is not None and self.latency_process.state() != QProcess.ProcessState.NotRunning:
-            self.latency_results_text.append("Test already in progress.")
-            return
-
-        # Refresh combo boxes with latest ports
-        self._populate_latency_combos()
-
-        self.latency_run_button.setEnabled(False)
-        self.latency_stop_button.setEnabled(True) # Enable Stop button
-        self.latency_results_text.clear() # Clear previous results/messages
-
-        if self.latency_raw_output_checkbox.isChecked():
-             self.latency_results_text.setText("Starting latency test (Raw Output)...\n"
-                                               "Select ports if not already selected.\n"
-                                               "Attempting auto-connection...\n")
-        else:
-             self.latency_results_text.setText("Starting latency test (Average)...\n"
-                                               "Select ports if not already selected.\n"
-                                               "Attempting auto-connection...\n"
-                                               "Waiting for measurement signal...\n") # Updated message
-
-        self.latency_values = []
-        # Only wait for connection signal if NOT showing raw output
-        self.latency_waiting_for_connection = not self.latency_raw_output_checkbox.isChecked()
-
-        self.latency_process = QProcess()
-        self.latency_process.readyReadStandardOutput.connect(self.handle_latency_output)
-        self.latency_process.finished.connect(self.handle_latency_finished)
-        self.latency_process.errorOccurred.connect(self.handle_latency_error)
-
-        # Determine command based on environment
-        if self.flatpak_env:
-            program = "flatpak-spawn"
-            arguments = ["--host", "jack_delay"]
-        else:
-            # Try jack_delay first, then jack_iodelay as fallback
-            program = shutil.which("jack_delay")
-            if program is None:
-                program = shutil.which("jack_iodelay")
-
-            # If neither is found, show error and exit
-            if program is None:
-                 self.latency_results_text.setText("Error: Neither 'jack_delay' nor 'jack_iodelay' found.\n"
-                                                   "Depending on your distribution, install jack-delay, jack_delay or jack-example-tools (jack_iodelay).")
-                 self.latency_run_button.setEnabled(True)  # Re-enable run button
-                 self.latency_stop_button.setEnabled(False) # Ensure stop is disabled
-                 self.latency_process = None # Clear the process object
-                 return # Stop execution
-
-            arguments = []
-
-        self.latency_process.setProgram(program) # Use the found program path
-        self.latency_process.setArguments(arguments)
-        self.latency_process.start() # Start the process
-        # Connection attempt is now triggered by _on_port_registered when jack_delay ports appear.
-
-    def handle_latency_output(self):
-        """Handles output from the jack_delay process."""
-        if self.latency_process is None:
-            return
-
-        data = self.latency_process.readAllStandardOutput().data().decode()
-
-        if self.latency_raw_output_checkbox.isChecked():
-            # Raw output mode: Append data directly
-            self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End)
-            self.latency_results_text.insertPlainText(data)
-            self.latency_results_text.moveCursor(QTextCursor.MoveOperation.End)
-        else:
-            # Average calculation mode (original logic)
-            # Check if we are waiting for the connection signal
-            if self.latency_waiting_for_connection:
-                # Check if any line contains a latency measurement
-                if re.search(r'\d+\.\d+\s+ms', data):
-                    self.latency_waiting_for_connection = False
-                    self.latency_results_text.setText("Connection detected. Running test...") # Changed message
-                    # Start the timer now
-                    self.latency_timer.setSingleShot(True)
-                    self.latency_timer.timeout.connect(self.stop_latency_test)
-                    self.latency_timer.start(10000) # 10 seconds
-
-            # If not waiting (or connection just detected), parse for values
-            if not self.latency_waiting_for_connection:
-                for line in data.splitlines():
-                    # Updated regex to capture both frames and ms
-                    match = re.search(r'(\d+\.\d+)\s+frames\s+(\d+\.\d+)\s+ms', line)
-                    if match:
-                        try:
-                            latency_frames = float(match.group(1))
-                            latency_ms = float(match.group(2))
-                            # Store both values as a tuple
-                            self.latency_values.append((latency_frames, latency_ms))
-                        except ValueError:
-                            pass # Ignore lines that don't parse correctly
-    def stop_latency_test(self):
-        """Stops the jack_delay process."""
-        if self.latency_timer.isActive():
-            self.latency_timer.stop() # Stop timer if called manually before timeout
-
-        if self.latency_process is not None and self.latency_process.state() != QProcess.ProcessState.NotRunning:
-            self.latency_results_text.append("\nStopping test...")
-            self.latency_process.terminate()
-            # Give it a moment to terminate gracefully before potentially killing
-            if not self.latency_process.waitForFinished(500):
-                self.latency_process.kill()
-                self.latency_process.waitForFinished() # Wait for kill confirmation
-
-            self.latency_waiting_for_connection = False # Reset flag
-
-    def handle_latency_finished(self, exit_code, exit_status):
-        """Handles the jack_delay process finishing."""
-        # Clear previous text before showing final result
-        self.latency_results_text.clear()
-
-        if self.latency_raw_output_checkbox.isChecked():
-            # If raw output was shown, just indicate stop
-            self.latency_results_text.setText("Measurement stopped.")
-        elif self.latency_values:
-            # Calculate average for frames and ms separately (only if not raw output)
-            total_frames = sum(val[0] for val in self.latency_values)
-            total_ms = sum(val[1] for val in self.latency_values)
-            count = len(self.latency_values)
-            average_frames = total_frames / count
-            average_ms = total_ms / count
-            # Display both average latencies
-            self.latency_results_text.setText(f"Round-trip latency (average): {average_frames:.3f} frames / {average_ms:.3f} ms")
-        else:
-            # Check if the process exited normally but produced no values
-            if exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0:
-                 # Display a clear error message
-                 self.latency_results_text.setText("No valid latency readings obtained. Check connections.")
-            elif exit_status == QProcess.ExitStatus.CrashExit:
-                 self.latency_results_text.setText("Measurement stopped.")
-            # Error message handled by handle_latency_error if exit code != 0 and no values were found
-            elif exit_code != 0:
-                 # If an error occurred (handled by handle_latency_error),
-                 # ensure some message is shown if handle_latency_error didn't set one.
-                 if not self.latency_results_text.toPlainText():
-                     self.latency_results_text.setText(f"Test failed (Exit code: {exit_code}). Check connections.")
-            else: # Should not happen often, but catch other cases
-                 self.latency_results_text.setText("Test finished without valid readings.")
-
-
-        self.latency_waiting_for_connection = False # Reset flag
-        self.latency_run_button.setEnabled(True)
-        self.latency_stop_button.setEnabled(False) # Disable Stop button
-        self.latency_process = None # Clear the process reference
-
-    def handle_latency_error(self, error):
-        """Handles errors occurring during the jack_delay process execution."""
-        error_string = self.latency_process.errorString() if self.latency_process else "Unknown error"
-        self.latency_results_text.append(f"\nError running jack_delay: {error} - {error_string}")
-
-        # Ensure timer and process are stopped/cleaned up
-        if self.latency_timer.isActive():
-            self.latency_timer.stop()
-        if self.latency_process is not None:
-            # Ensure process is terminated if it hasn't finished yet
-            if self.latency_process.state() != QProcess.ProcessState.NotRunning:
-                self.latency_process.kill()
-                self.latency_process.waitForFinished()
-            self.latency_process = None
-
-        self.latency_waiting_for_connection = False # Reset flag
-        self.latency_run_button.setEnabled(True)
-        self.latency_stop_button.setEnabled(False) # Disable Stop button on error
-
-    # --- End Latency Test Methods ---
-
-    def update_pwtop_output(self):
-        """Handle pw-top output updates"""
-        if self.pw_process is not None:
-            self.handle_pwtop_output()
-
-    def setup_latency_tab(self, tab_widget):
-        """Set up the Latency Test tab"""
-        layout = QVBoxLayout(tab_widget)
-
-        # Instructions Label
-
-        instructions_text = (
-            "<b>Instructions:</b><br><br>"
-            "1. Ensure 'jack_delay', 'jack-delay' or 'jack_iodelay' (via 'jack-example-tools') is installed.<br>"
-            "2. Physically connect an output and input of your audio interface using a cable (loopback).<br>"
-            "3. Select the corresponding Input (Capture) and Output (Playback) ports using the dropdowns below.<br>"
-            "4. Click 'Start Measurement'. The selected ports will be automatically connected to jack_delay.<br>"
-            "(you can click 'Start Measurement' first and then try different ports)<br>"
-            "5. <b><font color='orange'>Warning:</font></b> Start with low volume/gain levels on your interface "
-            "to avoid potential damage from the test signal.<br><br>"
-            "After the signal is detected, the average measured round-trip latency will be shown after 10 seconds.<br><br><br><br><br>"
-        )
-
-        instructions_label = QLabel(instructions_text)
-        instructions_label.setWordWrap(True)
-        instructions_label.setAlignment(Qt.AlignmentFlag.AlignTop)
-        # Increase font size for instructions
-        instructions_label.setStyleSheet(f"color: {self.text_color.name()}; font-size: 11pt;")
-        layout.addWidget(instructions_label)
-
-        # --- Combo Boxes for Port Selection ---
-        self.latency_input_combo = QComboBox()
-        self.latency_input_combo.setPlaceholderText("Select Input (Capture)...")
-        self.latency_input_combo.setStyleSheet(self.list_stylesheet()) # Reuse list style
-
-        self.latency_output_combo = QComboBox()
-        self.latency_output_combo.setPlaceholderText("Select Output (Playback)...")
-        self.latency_output_combo.setStyleSheet(self.list_stylesheet()) # Reuse list style
-
-        # --- Refresh Button ---
-        self.latency_refresh_button = QPushButton("Refresh Ports")
-        self.latency_refresh_button.setStyleSheet(self.button_stylesheet())
-        self.latency_refresh_button.clicked.connect(self._populate_latency_combos) # Connect to refresh method
-        # --- End Refresh Button ---
-
-        # --- Combo Boxes Layout ---
-        # Create a container widget for combo boxes to easily get their width later
-        combo_box_container = QWidget()
-        combo_box_layout = QVBoxLayout(combo_box_container)
-        combo_box_layout.setContentsMargins(0, 0, 0, 0) # Remove margins for accurate width
-
-        # Input Row - Label removed
-        input_combo_layout = QHBoxLayout()
-        # input_label = QLabel("Input  Port:  ") # Removed
-        # input_combo_layout.addWidget(input_label) # Removed
-        input_combo_layout.addWidget(self.latency_input_combo)
-        input_combo_layout.addStretch(1) # Add stretch to push combo box left
-        combo_box_layout.addLayout(input_combo_layout)
-
-        # Output Row - Label removed
-        output_combo_layout = QHBoxLayout()
-        # output_label = QLabel("Output Port:") # Removed
-        # output_combo_layout.addWidget(output_label) # Removed
-        output_combo_layout.addWidget(self.latency_output_combo)
-        output_combo_layout.addStretch(1) # Add stretch to push combo box left
-        combo_box_layout.addLayout(output_combo_layout)
-
-        # Add the container to the main layout
-        layout.addWidget(combo_box_container)
-
-        # --- Refresh Button Layout ---
-        # Align refresh button below the combo boxes, left-aligned
-        refresh_button_layout = QHBoxLayout()
-        refresh_button_layout.addWidget(self.latency_refresh_button)
-        refresh_button_layout.addStretch(1) # Push button to the left
-        layout.addLayout(refresh_button_layout)
-
-        # Add vertical space between refresh and start/stop buttons
-        layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)) # Increased spacer height
-
-        # --- End Combo Boxes ---
-
-
-        # --- Start/Stop Buttons Layout ---
-        start_stop_button_layout = QHBoxLayout()
-        self.latency_run_button = QPushButton('Start measurement')
-        self.latency_run_button.setStyleSheet(self.button_stylesheet())
-        self.latency_run_button.clicked.connect(self.run_latency_test)
-
-        self.latency_stop_button = QPushButton('Stop')
-        self.latency_stop_button.setStyleSheet(self.button_stylesheet())
-        self.latency_stop_button.clicked.connect(self.stop_latency_test)
-        self.latency_stop_button.setEnabled(False) # Initially disabled
-
-        # Add buttons, allowing them to size naturally
-        start_stop_button_layout.addWidget(self.latency_run_button) # Removed stretch factor
-        start_stop_button_layout.addWidget(self.latency_stop_button) # Removed stretch factor
-        start_stop_button_layout.addStretch(2) # Add stretch to the right to keep buttons left-aligned
-
-        layout.addLayout(start_stop_button_layout) # Add the horizontal layout for buttons
-
-        # Raw Output Toggle Checkbox
-        self.latency_raw_output_checkbox = QCheckBox("Show Raw Output (Continuous)")
-        self.latency_raw_output_checkbox.setToolTip("If 'ON', measurement has to be stopped manually with 'Stop' button") # Added tooltip
-        self.latency_raw_output_checkbox.setStyleSheet(f"color: {self.text_color.name()};") # Style checkbox text
-        # Checkbox will be added after the results text edit
-
-        # Results Text Edit
-        self.latency_results_text = QTextEdit()
-        self.latency_results_text.setReadOnly(True)
-        # Increase font size for results text
-        self.latency_results_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {self.background_color.name()};
-                color: {self.text_color.name()};
-                font-family: monospace;
-                font-size: 14pt;
-            }}
-        """)
-        self.latency_results_text.setText("Ready to test.")
-        layout.addWidget(self.latency_results_text, 1) # Add stretch factor
-        layout.addWidget(self.latency_raw_output_checkbox) # Add checkbox below results
-
-        # Populate combo boxes
-        self._populate_latency_combos()
-
-        # Connect signals
-        self.latency_input_combo.currentIndexChanged.connect(self._on_latency_input_selected)
-        self.latency_output_combo.currentIndexChanged.connect(self._on_latency_output_selected)
-
-    def _populate_latency_combos(self):
-        """Populates the latency test combo boxes using python-jack."""
-        capture_ports = [] # Physical capture devices (JACK outputs)
-        playback_ports = [] # Physical playback devices (JACK inputs)
-        try:
-            # Get physical capture ports (System Output -> JACK Input)
-            jack_capture_ports = self.client.get_ports(is_physical=True, is_audio=True, is_output=True)
-            capture_ports = sorted([port.name for port in jack_capture_ports])
-
-            # Get physical playback ports (System Input <- JACK Output)
-            jack_playback_ports = self.client.get_ports(is_physical=True, is_audio=True, is_input=True)
-            playback_ports = sorted([port.name for port in jack_playback_ports])
-
-        except jack.JackError as e:
-            print(f"Error getting physical JACK ports: {e}")
-            # Optionally display an error in the UI
-
-        # Block signals while populating to avoid triggering handlers prematurely
-        self.latency_input_combo.blockSignals(True)
-        self.latency_output_combo.blockSignals(True)
-
-        # Clear existing items first, keeping placeholder
-        self.latency_input_combo.clear()
-        self.latency_output_combo.clear()
-        self.latency_input_combo.addItem("Select Physical Input (Capture)...", None) # Add placeholder back
-        self.latency_output_combo.addItem("Select Physical Output (Playback)...", None) # Add placeholder back
-
-        # Populate Input Combo (Capture Ports - JACK Outputs)
-        for port_name in capture_ports:
-            self.latency_input_combo.addItem(port_name, port_name) # Use name for display and data
-
-        # Populate Output Combo (Playback Ports - JACK Inputs)
-        for port_name in playback_ports:
-            self.latency_output_combo.addItem(port_name, port_name) # Use name for display and data
-
-        # Restore previous selection if port names still exist
-        if self.latency_selected_input_alias:
-            index = self.latency_input_combo.findData(self.latency_selected_input_alias)
-            if index != -1:
-                self.latency_input_combo.setCurrentIndex(index)
-        if self.latency_selected_output_alias:
-            index = self.latency_output_combo.findData(self.latency_selected_output_alias)
-            if index != -1:
-                self.latency_output_combo.setCurrentIndex(index)
-
-        # --- Set Output Combo Width to Match Input Combo Width ---
-        # Use sizeHint after population for a better estimate of required width.
-        input_width = self.latency_input_combo.sizeHint().width()
-        if input_width > 0: # Ensure valid width before setting
-             # print(f"Setting latency_output_combo minimum width to: {input_width}") # Optional debug print
-             self.latency_output_combo.setMinimumWidth(input_width)
-             # Ensure the output combo can expand horizontally if needed
-             output_policy = self.latency_output_combo.sizePolicy()
-             # Using Expanding ensures it takes *at least* the input width, and can grow if layout dictates
-             output_policy.setHorizontalPolicy(QSizePolicy.Policy.Expanding)
-             self.latency_output_combo.setSizePolicy(output_policy)
-        # --- End Width Setting ---
-
-        # Unblock signals
-        self.latency_input_combo.blockSignals(False)
-        self.latency_output_combo.blockSignals(False)
-
-
-    def _on_latency_input_selected(self, index):
-        """Stores the selected physical input port alias."""
-        self.latency_selected_input_alias = self.latency_input_combo.itemData(index)
-        # Attempt connection if output is also selected and test is running
-        self._attempt_latency_auto_connection()
-
-    def _on_latency_output_selected(self, index):
-        """Stores the selected physical output port alias."""
-        self.latency_selected_output_alias = self.latency_output_combo.itemData(index)
-        # Attempt connection if input is also selected and test is running
-        self._attempt_latency_auto_connection()
-
-    def _attempt_latency_auto_connection(self):
-        """Connects selected physical ports to jack_delay if ports are selected."""
-        # Only connect if both an input and output alias have been selected from the dropdowns.
-        # The call to this function is now triggered by jack_delay port registration.
-        if (self.latency_selected_input_alias and
-            self.latency_selected_output_alias):
-
-            # Pipewire 'in' direction (our output_ports list) connects to jack_delay:out
-            # Pipewire 'out' direction (our input_ports list) connects to jack_delay:in
-            output_to_connect = self.latency_selected_output_alias # This is the physical playback port alias
-            input_to_connect = self.latency_selected_input_alias   # This is the physical capture port alias
-
-            print(f"Attempting auto-connection: jack_delay:out -> {output_to_connect}")
-            print(f"Attempting auto-connection: {input_to_connect} -> jack_delay:in")
-
-            # Use the existing connection methods (ensure jack_delay ports exist first)
-            # We might need a small delay or check if jack_delay ports are ready.
-            # For now, let's assume they appear quickly after process start.
-            try:
-                # Connect jack_delay output to the selected physical playback port
-                # Ensure the target port exists before connecting
-                if any(p.name == output_to_connect for p in self.client.get_ports(is_input=True, is_audio=True)):
-                     self.make_connection("jack_delay:out", output_to_connect)
-                else:
-                     print(f"Warning: Target output port '{output_to_connect}' not found.")
-
-                # Connect the selected physical capture port to jack_delay input
-                # Ensure the target port exists before connecting
-                if any(p.name == input_to_connect for p in self.client.get_ports(is_output=True, is_audio=True)):
-                    self.make_connection(input_to_connect, "jack_delay:in")
-                else:
-                    print(f"Warning: Target input port '{input_to_connect}' not found.")
-
-                self.latency_results_text.append("\nTry diffrent ports if you're seeing this message after clicking 'Start measurement button")
-                # Refresh the audio tab view to show the new connections
-                if self.port_type == 'audio':
-                    self.refresh_ports()
-
-            except jack.JackError as e:
-                 # Catch specific Jack errors if needed, e.g., port not found
-                 print(f"Error during latency auto-connection (JackError): {e}")
-                 self.latency_results_text.append(f"\nError auto-connecting (JACK): {e}")
-            except Exception as e:
-                print(f"Error during latency auto-connection: {e}")
-                self.latency_results_text.append(f"\nError auto-connecting: {e}")
-
-    # Removed _get_physical_audio_ports method as we now use python-jack directly
-
-    def setup_port_tab(self, tab_widget, tab_name, port_type):
-        layout = QVBoxLayout(tab_widget)
-        input_layout = QVBoxLayout()
-        output_layout = QVBoxLayout()
-        input_label = QLabel(f' {tab_name} Input Ports')
-        output_label = QLabel(f' {tab_name} Output Ports')
-
-        font = QFont()
-        font.setBold(True)
-        input_label.setFont(font)
-        output_label.setFont(font)
-        input_label.setStyleSheet(f"color: {self.text_color.name()};")
-        output_label.setStyleSheet(f"color: {self.text_color.name()};")
-
-        # Replace list widgets with tree widgets
-        input_tree = DropPortTreeWidget()
-        output_tree = DragPortTreeWidget()
-        connection_scene = QGraphicsScene()
-        connection_view = ConnectionView(connection_scene)
-
-        input_tree.setStyleSheet(self.list_stylesheet())
-        output_tree.setStyleSheet(self.list_stylesheet())
-        connection_view.setStyleSheet(f"background: {self.background_color.name()}; border: none;")
-
-        input_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
-        output_layout.addSpacerItem(QSpacerItem(20, 17, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
-
-        input_layout.addWidget(input_label)
-        input_layout.addWidget(input_tree)
-        # Input filter box (self.input_filter_edit/self.midi_input_filter_edit) created in __init__
-
-
-        output_layout.addWidget(output_label)
-        output_layout.addWidget(output_tree)
-        # Output filter box (self.output_filter_edit/self.midi_output_filter_edit) created in __init__
-
-
-        middle_layout = QVBoxLayout()
-        button_layout = QHBoxLayout() # Top buttons: Connect, Disconnect, Presets
-        connect_button = QPushButton('Connect')
-        connect_button.setToolTip("Connect selected ports (C)") # Add tooltip
-        disconnect_button = QPushButton('Disconnect')
-        disconnect_button.setToolTip("Disconnect selected ports (D or Delete)") # Add tooltip
-        # Presets button moved here from bottom layout
-        presets_button = QPushButton("Presets")
-        presets_button.setStyleSheet(self.button_stylesheet())
-        presets_button.clicked.connect(self._show_preset_menu)
-        # Refresh button created but not added here (moved to bottom)
-        refresh_button = QPushButton('Refresh')
-
-        # Apply styles
-        for button in [connect_button, disconnect_button, presets_button, refresh_button]:
-             button.setStyleSheet(self.button_stylesheet())
-
-        # Add buttons to top layout
-        button_layout.addWidget(connect_button)
-        button_layout.addWidget(disconnect_button)
-        button_layout.addWidget(presets_button) # Add presets button to top layout
-        middle_layout.addLayout(button_layout)
-        middle_layout.addWidget(connection_view)
-
-        middle_layout_widget = QWidget()
-        middle_layout_widget.setLayout(middle_layout)
-        middle_layout_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        middle_layout_widget.setFixedWidth(self.initial_middle_width)
-
-        content_layout = QHBoxLayout()
-        content_layout.addLayout(output_layout)
-        content_layout.addWidget(middle_layout_widget)
-        content_layout.addLayout(input_layout)
-        layout.addLayout(content_layout)
-
-        if port_type == 'audio':
-            self.input_tree = input_tree
-            self.output_tree = output_tree
-            self.connection_scene = connection_scene
-            self.connection_view = connection_view
-            self.connect_button = connect_button
-            self.disconnect_button = disconnect_button
-            self.refresh_button = refresh_button # Keep assignment for the bottom layout logic
-            self.presets_button = presets_button # Assign presets button for audio tab
-            # References (self.input_filter_edit, self.output_filter_edit) created in __init__
-
-            input_tree.itemClicked.connect(self.on_input_clicked)
-            output_tree.itemClicked.connect(self.on_output_clicked)
-            connect_button.clicked.connect(self.make_connection_selected)
-            disconnect_button.clicked.connect(self.break_connection_selected)
-            refresh_button.clicked.connect(self.refresh_ports)
-            # Connect filter signals using instance attributes to a new handler
-            # Disconnect previous connections first to avoid duplicates if setup is called multiple times (unlikely but safe)
-            try: self.input_filter_edit.textChanged.disconnect()
-            except TypeError: pass # No connection existed
-            try: self.output_filter_edit.textChanged.disconnect()
-            except TypeError: pass # No connection existed
-
-            self.input_filter_edit.textChanged.connect(self._handle_filter_change)
-            self.output_filter_edit.textChanged.connect(self._handle_filter_change)
-        elif port_type == 'midi':
-            self.midi_input_tree = input_tree
-            self.midi_output_tree = output_tree
-            self.midi_connection_scene = connection_scene
-            self.midi_connection_view = connection_view
-            self.midi_connect_button = connect_button
-            self.midi_disconnect_button = disconnect_button
-            self.midi_refresh_button = refresh_button # Keep assignment for the bottom layout logic
-            self.midi_presets_button = presets_button # Assign presets button for midi tab
-            # References (self.midi_input_filter_edit, self.midi_output_filter_edit) created in __init__
-
-            input_tree.itemClicked.connect(self.on_midi_input_clicked)
-            output_tree.itemClicked.connect(self.on_midi_output_clicked)
-            connect_button.clicked.connect(self.make_midi_connection_selected)
-            disconnect_button.clicked.connect(self.break_midi_connection_selected)
-            refresh_button.clicked.connect(self.refresh_ports)
-            # Filter signals are connected in the 'audio' block to the shared handler
-
-        # Apply initial font size to the created trees
-        self._apply_port_list_font_size()
+    # Removed setup_port_tab (moved to TabUIManager)
+    # pw-top methods moved to PwTopMonitor class
+    # Removed setup_port_tab (moved to TabUIManager)
 
     def setup_bottom_layout(self, main_layout):
         bottom_layout = QHBoxLayout()
@@ -2028,17 +2302,17 @@ class JackConnectionManager(QMainWindow):
         self.collapse_all_checkbox.stateChanged.connect(self.toggle_collapse_all)
 
         # Undo/Redo buttons
-        self.undo_button = QPushButton('Undo')
+        self.undo_button = QPushButton('       Undo       ')
         self.undo_button.setToolTip("Undo last action (Ctrl+Z)") # Add tooltip
-        self.redo_button = QPushButton('Redo')
-        self.redo_button.setToolTip("Redo last action (Ctrl+Y or Ctrl+Shift+Z)") # Add tooltip
+        self.redo_button = QPushButton('       Redo       ')
+        self.redo_button.setToolTip("Redo last action (Ctrl+Y/Ctrl+Shift+Z)") # Add tooltip
         # Try to get size hint from connect button if it exists, otherwise use default
         try:
             button_size = self.connect_button.sizeHint()
         except AttributeError:
             button_size = QSize(75, 25) # Default size if connect_button not yet created
-        self.undo_button.setFixedSize(button_size)
-        self.redo_button.setFixedSize(button_size)
+        #self.undo_button.setFixedSize(button_size)
+        #self.redo_button.setFixedSize(button_size)
 
         for button in [self.undo_button, self.redo_button]:
             button.setStyleSheet(self.button_stylesheet())
@@ -2067,7 +2341,7 @@ class JackConnectionManager(QMainWindow):
         # Presets button moved to setup_port_tab
 
         # Refresh button (moved from top layout) - One button for both tabs
-        self.bottom_refresh_button = QPushButton('Refresh')
+        self.bottom_refresh_button = QPushButton('     Refresh     ')
         self.bottom_refresh_button.setToolTip("Refresh port list (R)") # Add tooltip
         self.bottom_refresh_button.setStyleSheet(self.button_stylesheet())
         # refresh_ports already handles audio/midi based on self.port_type
@@ -2173,9 +2447,9 @@ class JackConnectionManager(QMainWindow):
         self.config_manager.set_bool('collapse_all_enabled', is_checked)
 
     def switch_tab(self, index):
-        # Stop pw-top if switching away from it (index is the *new* index)
-        if index != 2 and hasattr(self, 'pw_process') and self.pw_process is not None:
-            self.stop_pwtop_process()
+        # Stop pw-top monitor if switching away from it
+        if index != 2 and hasattr(self, 'pwtop_monitor') and self.pwtop_monitor is not None:
+             self.pwtop_monitor.stop()
         
         # Configure based on the new tab index
         if index < 2:  # Audio or MIDI tabs
@@ -2184,9 +2458,9 @@ class JackConnectionManager(QMainWindow):
             self.refresh_visualizations()
             self.show_bottom_controls(True) # Show controls
         elif index == 2:  # pw-top tab
-            # Start pw-top process only when switching to this tab
-            if self.pw_process is None or self.pw_process.state() == QProcess.ProcessState.NotRunning:
-                self.start_pwtop_process()
+            # Start pw-top monitor only when switching to this tab
+            if hasattr(self, 'pwtop_monitor') and self.pwtop_monitor is not None:
+                self.pwtop_monitor.start()
             self.show_bottom_controls(False) # Hide controls
         elif index == 3: # jack_delay tab
             # No specific process to start here, just hide controls
@@ -2194,6 +2468,10 @@ class JackConnectionManager(QMainWindow):
         
         # Update the refresh interval based on the new tab and current focus state
         self._update_refresh_timer_interval()
+        
+        # Save the current tab index to config
+        self.last_active_tab = index
+        self.config_manager.set_int('last_active_tab', index)
 
     def show_bottom_controls(self, visible):
         """Show or hide bottom controls based on active tab"""
@@ -2267,14 +2545,15 @@ class JackConnectionManager(QMainWindow):
         """Handle port registration events in the Qt main thread"""
         if not self.callbacks_enabled:
             return
-        
 
-        # Check if this is a jack_delay port registration, and if so, attempt auto-connection
-        if port_name == "jack_delay:in" or port_name == "jack_delay:out":
-            print(f"Detected registration of {port_name}, attempting latency auto-connection...")
+
+        # Check if this is a jack_delay port registration, and if so, attempt auto-connection via LatencyTester
+        if (hasattr(self, 'latency_tester') and self.latency_tester is not None and
+            (port_name == "jack_delay:in" or port_name == "jack_delay:out")):
+            print(f"Detected registration of {port_name}, attempting latency auto-connection via LatencyTester...")
             # Use QTimer.singleShot to slightly delay the connection attempt,
             # ensuring both jack_delay ports might be ready.
-            QTimer.singleShot(50, self._attempt_latency_auto_connection) # 50ms delay
+            QTimer.singleShot(50, self.latency_tester._attempt_latency_auto_connection) # 50ms delay
 
         self.refresh_ports(refresh_all=True)
 
@@ -2344,7 +2623,7 @@ class JackConnectionManager(QMainWindow):
             self._update_refresh_timer_interval()
     # --- End Focus Handling --- (Replaced focusIn/OutEvent with changeEvent)
 
-    # --- Add Preset Handling Methods ---
+    # Preset handling methods moved to PresetHandler class
 
     def _get_current_connections(self):
         """Gets the current state of all JACK audio and MIDI connections."""
@@ -2374,370 +2653,6 @@ class JackConnectionManager(QMainWindow):
         except jack.JackError as e:
             print(f"Error getting current connections: {e}")
         return all_connections
-
-    def _show_preset_menu(self):
-        """Creates and shows the preset management menu."""
-        menu = QMenu(self)
-        preset_names = self.preset_manager.get_preset_names()
-
-        # --- Save Section ---
-        # Use a temporary attribute to hold the line edit for the save action
-        self._preset_menu_name_edit = QLineEdit()
-        self._preset_menu_name_edit.setPlaceholderText("Enter New Preset Name...")
-        self._preset_menu_name_edit.returnPressed.connect(self._save_current_preset_from_menu) # Connect Enter key
-        self._preset_menu_name_edit.setMinimumWidth(200) # Give it some space
-        # Apply similar styling as filter edits
-        filter_style = f"""
-            QLineEdit {{
-                background-color: {self.background_color.name()};
-                color: {self.text_color.name()};
-                border: 1px solid {self.text_color.name()};
-                padding: 2px;
-                border-radius: 3px;
-            }}
-        """
-        self._preset_menu_name_edit.setStyleSheet(filter_style)
-
-        name_action = QWidgetAction(menu)
-        name_action.setDefaultWidget(self._preset_menu_name_edit)
-        menu.addAction(name_action)
-
-        save_action = QAction("Save Current as New Preset", menu)
-        save_action.triggered.connect(self._save_current_preset_from_menu)
-        menu.addAction(save_action)
-
-        # --- Add "Save" action for currently loaded preset ---
-        save_loaded_action = QAction("Save", menu)
-        save_loaded_action.setToolTip(f"Save current connections over loaded preset '{self.current_preset_name}'")
-        # Enable only if a preset is currently loaded
-        save_loaded_action.setEnabled(bool(self.current_preset_name))
-        save_loaded_action.triggered.connect(self._save_current_loaded_preset)
-        menu.addAction(save_loaded_action)
-        # --- End Add "Save" action ---
-
-        menu.addSeparator()
-
-        # --- Load Section ---
-        load_menu = menu.addMenu("Load Preset") # Create menu even if no presets exist
-
-        # Add "Default" option at the top
-        default_action = QAction("Default", load_menu)
-        default_action.triggered.connect(self._handle_default_preset_action)
-        load_menu.addAction(default_action)
-        load_menu.addSeparator() # Add separator after "Default"
-
-        if preset_names:
-            for name in preset_names:
-                load_action = QAction(name, load_menu)
-                # Highlight if this is the currently active preset
-                # Compare with self.current_preset_name (initialized from config)
-                if name == self.current_preset_name:
-                    font = load_action.font()
-                    font.setBold(True)
-                    load_action.setFont(font)
-                # Use lambda to capture the correct name and call the new handler
-                load_action.triggered.connect(lambda checked=False, n=name: self._handle_gui_preset_load(n))
-                load_menu.addAction(load_action)
-        else:
-            no_load_action = QAction("No Saved Presets", menu)
-            no_load_action.setEnabled(False)
-            menu.addAction(no_load_action)
-
-        # --- Delete Section ---
-        if preset_names:
-            menu.addSeparator()
-            delete_menu = menu.addMenu("Delete Preset")
-            for name in preset_names:
-                delete_action = QAction(name, delete_menu)
-                # Use lambda to capture the correct name for the slot
-                delete_action.triggered.connect(lambda checked=False, n=name: self._delete_selected_preset(n))
-                delete_menu.addAction(delete_action)
-
-        # --- Startup Preset Section ---
-        menu.addSeparator()
-        startup_menu = menu.addMenu("Preset to load at (auto)start")
-        startup_group = QActionGroup(startup_menu) # Use QActionGroup for exclusivity
-        startup_group.setExclusive(True)
-
-        # Add "None" option
-        none_action = QAction("None", startup_menu)
-        none_action.setCheckable(True)
-        none_action.setChecked(not self.startup_preset_name or self.startup_preset_name == 'None')
-        none_action.triggered.connect(lambda checked=False: self._set_startup_preset(None))
-        startup_menu.addAction(none_action)
-        startup_group.addAction(none_action) # Add to group
-        startup_menu.addSeparator() # Add spacer after 'None'
-
-        # Add existing presets
-        for name in preset_names:
-            startup_action = QAction(name, startup_menu)
-            startup_action.setCheckable(True)
-            startup_action.setChecked(name == self.startup_preset_name)
-            # Use lambda to capture the correct name
-            startup_action.triggered.connect(lambda checked=False, n=name: self._set_startup_preset(n))
-            startup_menu.addAction(startup_action)
-            startup_group.addAction(startup_action) # Add to group
-
-        # Show the menu at the presets button position
-        presets_button_pos = self.presets_button.mapToGlobal(QPoint(0, self.presets_button.height()))
-        menu.exec(presets_button_pos)
-
-        # Clean up reference to the line edit after the menu is closed
-        del self._preset_menu_name_edit
-
-
-    def _save_current_preset_from_menu(self):
-        """Saves the current connections using the name from the menu's line edit."""
-        # Retrieve name from the temporary attribute holding the QLineEdit
-        preset_name = self._preset_menu_name_edit.text().strip()
-        if not preset_name:
-            QMessageBox.warning(self, "Save Preset", "Enter a name for the preset.")
-            return
-
-        current_connections = self._get_current_connections()
-        if not current_connections:
-             QMessageBox.information(self, "Save Preset", "No connections to save.")
-             return
-
-        if self.preset_manager.save_preset(preset_name, current_connections, self): # Pass self as parent_widget
-            print(f"Preset '{preset_name}' saved.")
-            show_timed_messagebox(self, QMessageBox.Icon.Information, "Preset Saved", f"Preset '{preset_name}' saved successfully.")
-   #     else:
-    #        QMessageBox.critical(self, "Save Preset", f"Failed to save preset '{preset_name}'.")
-
-
-    def _set_startup_preset(self, name):
-       """Sets the selected preset name as the startup preset in the config."""
-       print(f"Setting startup preset to: {name}")
-       self.startup_preset_name = name # Update internal state
-       # Save the actual preset name, or None (which ConfigManager saves as empty string)
-       self.config_manager.set_str('startup_preset', name)
-       # No need to update menu check state here as it's closed
-
-    def _load_selected_preset(self, name, is_startup=False):
-        """Loads the connections from the selected preset.
-        Updates self.current_preset_name and returns True on success, False otherwise.
-        is_startup flag prevents showing success message on startup load."""
-        print(f"Loading preset: {name}")
-        preset_connections = self.preset_manager.get_preset(name)
-        if preset_connections is None:
-            if not is_startup: # Only show message box in GUI mode
-                QMessageBox.critical(self, "Load Preset", f"Could not find preset '{name}'.")
-            else:
-                print(f"Error: Could not find preset '{name}'.")
-            self.current_preset_name = None # Clear preset name on failure
-            return False # Indicate failure
-
-        # 1. Get current connections
-        current_connections = self._get_current_connections()
-
-        # 2. Disconnect all current connections
-        print("Disconnecting existing connections...")
-        connections_to_restore_on_error = [] # Keep track if disconnect fails mid-way
-        try:
-            for conn in current_connections:
-                conn_type = conn.get("type", "audio") # Default to audio if type missing
-                output_name = conn.get("output")
-                input_name = conn.get("input")
-                if output_name and input_name:
-                    connections_to_restore_on_error.append(conn) # Add before attempting disconnect
-                    print(f"  Disconnecting {output_name} -> {input_name} ({conn_type})")
-                    if conn_type == "midi":
-                        self.client.disconnect(output_name, input_name)
-                    else:
-                        self.client.disconnect(output_name, input_name)
-                    # Remove from restore list on success
-                    connections_to_restore_on_error.pop()
-        except jack.JackError as e:
-            print(f"Error during disconnection phase: {e}. Attempting to restore...")
-            # Attempt to restore connections that were successfully disconnected before the error
-            for restore_conn in connections_to_restore_on_error:
-                try:
-                    self.client.connect(restore_conn["output"], restore_conn["input"])
-                except jack.JackError: pass # Ignore restore errors
-            if not is_startup:
-                QMessageBox.warning(self, "Load Preset Error", f"An error occurred disconnecting existing connections: {e}\nPreset loading aborted.")
-            else:
-                print(f"Error during disconnection phase: {e}. Preset loading aborted.")
-            self.refresh_ports() # Refresh UI to show potentially restored state
-            self.current_preset_name = None # Clear preset name on failure
-            return False # Indicate failure
-        except Exception as e: # Catch other potential errors
-            print(f"Unexpected error during disconnection: {e}")
-            if not is_startup:
-                QMessageBox.critical(self, "Load Preset Error", f"An unexpected error occurred during disconnection: {e}\nPreset loading aborted.")
-            else:
-                print(f"Unexpected error during disconnection: {e}. Preset loading aborted.")
-            self.refresh_ports()
-            self.current_preset_name = None # Clear preset name on failure
-            return False # Indicate failure
-
-        # 3. Connect preset connections
-        print(f"Connecting preset '{name}' connections...")
-        connections_made = []
-        errors_occurred = False
-        try:
-            for conn in preset_connections:
-                conn_type = conn.get("type", "audio")
-                output_name = conn.get("output")
-                input_name = conn.get("input")
-                if output_name and input_name:
-                    try:
-                        print(f"  Connecting {output_name} -> {input_name} ({conn_type})")
-                        # Check if ports exist before connecting
-                        # Note: This adds overhead but prevents JackErrors for non-existent ports
-                        out_port_exists = any(p.name == output_name for p in self.client.get_ports(is_output=True, is_midi=(conn_type == "midi")))
-                        in_port_exists = any(p.name == input_name for p in self.client.get_ports(is_input=True, is_midi=(conn_type == "midi")))
-
-                        if out_port_exists and in_port_exists:
-                            if conn_type == "midi":
-                                self.client.connect(output_name, input_name)
-                            else:
-                                self.client.connect(output_name, input_name)
-                            connections_made.append(conn) # Track successful connections
-                        else:
-                            print(f"    Skipping connection: Port(s) not found (Output: {out_port_exists}, Input: {in_port_exists})")
-                            errors_occurred = True # Flag that some connections were skipped
-
-                    except jack.JackError as e:
-                        print(f"    Error connecting {output_name} -> {input_name}: {e}")
-                        errors_occurred = True # Flag that errors occurred
-                        # Continue to the next connection (original behavior)
-                    except Exception as e: # Catch other potential errors
-                        print(f"    Unexpected error connecting {output_name} -> {input_name}: {e}")
-                        errors_occurred = True
-                        # Continue to the next connection
-
-        except Exception as e: # Catch broader errors during the connection loop setup itself (e.g., iterating preset_connections)
-            print(f"Unexpected error during connection phase setup: {e}")
-            if not is_startup:
-                QMessageBox.critical(self, "Load Preset Error", f"An unexpected error occurred during connection phase: {e}\nPreset loading failed.")
-            else:
-                print(f"Unexpected error during connection phase: {e}. Preset loading failed.")
-            self.refresh_ports()
-            self.current_preset_name = None # Clear preset name on failure
-            return False # Indicate failure - This was a setup error, not a connection error
-
-        # 4. Refresh UI and update state
-        print("Preset load complete. Refreshing UI.")
-        self.current_preset_name = name # Set the current preset name on success/partial success
-        self.refresh_ports() # This updates visuals and button states
-
-        if errors_occurred:
-             # Only show message if not loading at startup
-             if not is_startup:
-                  QMessageBox.information(self, "Load Preset", f"Preset '{name}' loaded, but some connections could not be made (ports might be missing).")
-        else:
-             # Only show message if not loading at startup
-             if not is_startup:
-                  show_timed_messagebox(self, QMessageBox.Icon.Information, "Load Preset", f"Preset '{name}' loaded successfully.")
-
-        return True # Indicate success
-
-    def _delete_selected_preset(self, name):
-        """Deletes the selected preset after confirmation."""
-        reply = QMessageBox.question(self, 'Delete Preset',
-                                     f"Are you sure you want to delete the preset '{name}'?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                     QMessageBox.StandardButton.No)
-
-        if reply == QMessageBox.StandardButton.Yes:
-            if self.preset_manager.delete_preset(name):
-                print(f"Preset '{name}' deleted.")
-                show_timed_messagebox(self, QMessageBox.Icon.Information, "Preset Deleted", f"Preset '{name}' deleted.")
-            else:
-                QMessageBox.warning(self, "Delete Preset", f"Could not find or delete preset '{name}'.")
-
-    # --- Add New Method ---
-    def _handle_gui_preset_load(self, name):
-        """Handles loading a preset via the GUI menu click."""
-        success = self._load_selected_preset(name) # This updates self.current_preset_name
-        if success:
-            # Save the newly loaded preset name to config for the next run
-            self.config_manager.set_str('active_preset', name)
-            print(f"GUI Load: Set active_preset in config to '{name}'")
-        else:
-            # If loading failed, _load_selected_preset set self.current_preset_name to None.
-            # Clear the active_preset in config as well.
-            self.config_manager.set_str('active_preset', None)
-            print("GUI Load: Cleared active_preset in config due to load failure.")
-        # No need to manually update menu bolding here, it happens next time menu is opened.
-    # --- End New Method ---
-
-    # --- End Preset Handling Methods ---
-
-    def _handle_default_preset_action(self):
-        """Handles the 'Default' preset action: disconnects all connections, then restarts the session manager."""
-        reply = QMessageBox.question(self, 'Confirm Reset',
-                                     "This will disconnect all current connections and then restart WirePlumber"
-                                     "to restore default connections.\n\n"
-                                     "Are you sure you want to proceed?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                     QMessageBox.StandardButton.No) # Default to No
-
-        if reply == QMessageBox.StandardButton.Yes:
-            print("User confirmed default connection reset.")
-
-            # --- Step 1: Disconnect All Connections ---
-            print("Step 1: Disconnecting all existing JACK connections...")
-            current_connections = self._get_current_connections()
-            disconnect_errors = []
-            disconnected_count = 0
-
-            if current_connections:
-                for conn in current_connections:
-                    output_name = conn.get("output")
-                    input_name = conn.get("input")
-                    if output_name and input_name:
-                        try:
-                            # print(f"  Disconnecting {output_name} -> {input_name}") # Verbose logging
-                            self.client.disconnect(output_name, input_name)
-                            disconnected_count += 1
-                        except jack.JackError as e:
-                            print(f"    Warning: Could not disconnect {output_name} -> {input_name}: {e}")
-                        except Exception as e:
-                             print(f"    Unexpected error disconnecting {output_name} -> {input_name}: {e}")
-                             disconnect_errors.append(f"{output_name} -> {input_name}: {e}")
-                print(f"Step 1: Disconnected {disconnected_count} connections.")
-                if disconnect_errors:
-                    print(f"Step 1: Encountered unexpected errors during disconnection: {disconnect_errors}")
-            else:
-                print("Step 1: No active JACK connections found to disconnect.")
-
-            # --- Step 2: Restart Session Manager ---
-            print("Step 2: Restarting PipeWire session manager...")
-            service_name = "wireplumber.service" # Default to WirePlumber
-            command = []
-            if self.flatpak_env:
-                print(f"  Running in Flatpak environment. Using flatpak-spawn to restart {service_name}.")
-                command = ["flatpak-spawn", "--host", "systemctl", "restart", "--user", service_name]
-            else:
-                print(f"  Running outside Flatpak environment. Using systemctl to restart {service_name}.")
-                command = ["systemctl", "restart", "--user", service_name]
-
-            print(f"  Executing command: {' '.join(command)}")
-            success = QProcess.startDetached(command[0], command[1:])
-
-            # --- Finalization ---
-            # Clear the active preset regardless of restart success
-            self.config_manager.set_str('active_preset', None)
-            self.current_preset_name = None
-            print("Cleared active_preset in config after selecting 'Default'.")
-
-            if success:
-                print("Step 2: Session manager restart command initiated successfully.")
-                show_timed_messagebox(self, QMessageBox.Icon.Information, "Resetting Connections",
-                                      f"Disconnected {disconnected_count} connections.\nSession manager ({service_name}) restart initiated.", 2500)
-                # Trigger a refresh after a delay to allow session manager to restart and apply defaults
-                QTimer.singleShot(2000, self.refresh_ports) # Increased delay slightly
-            else:
-                error_message = f"Failed to execute session manager restart command: {' '.join(command)}\n\n" \
-                                f"Connections were disconnected, but defaults may not be restored.\n" \
-                                f"If you are not using WirePlumber, you might need to manually restart your session manager (e.g., pipewire-media-session.service)."
-                print(error_message)
-                QMessageBox.critical(self, "Reset Error", error_message)
-                # Refresh immediately to show the disconnected state
-                self.refresh_ports()
     def is_dark_mode(self):
         palette = QApplication.palette()
         return palette.window().color().lightness() < 128
@@ -2933,14 +2848,19 @@ class JackConnectionManager(QMainWindow):
                  self.apply_collapse_state_to_current_trees() # This method checks self.port_type internally
 
 
-    def refresh_ports(self, refresh_all=False):
+    def refresh_ports(self, refresh_all=False, from_shortcut=False):
         """
         Refreshes the port lists displayed in the trees.
 
         Args:
             refresh_all (bool): If True, refresh both audio and MIDI ports.
                                 If False, refresh only the currently active port type.
+            from_shortcut (bool): If True, animate the refresh button press.
         """
+        # Animate the refresh button if triggered by shortcut
+        if from_shortcut:
+            self._animate_button_press(self.bottom_refresh_button)
+            
         if refresh_all:
             # print("DEBUG: Refreshing ALL ports (Audio and MIDI)") # Optional debug log
             self._refresh_single_port_type('audio')
@@ -3389,6 +3309,9 @@ class JackConnectionManager(QMainWindow):
         self.redo_button.setEnabled(self.connection_history.can_redo())
 
     def undo_action(self):
+        # Animate the undo button press
+        self._animate_button_press(self.undo_button)
+        
         action = self.connection_history.undo()
         if action:
             action_type, output_name, input_name = action
@@ -3409,6 +3332,9 @@ class JackConnectionManager(QMainWindow):
 
 
     def redo_action(self):
+        # Animate the redo button press
+        self._animate_button_press(self.redo_button)
+        
         action = self.connection_history.redo()
         if action:
             action_type, output_name, input_name = action
@@ -4089,9 +4015,9 @@ class JackConnectionManager(QMainWindow):
         self.connection_view.stop_refresh_timer()
         self.midi_connection_view.stop_refresh_timer()
 
-        # Stop pw-top process before closing
-        if hasattr(self, 'pw_process') and self.pw_process is not None:
-            self.stop_pwtop_process()
+        # Stop pw-top monitor before closing
+        if hasattr(self, 'pwtop_monitor') and self.pwtop_monitor is not None:
+            self.pwtop_monitor.stop()
 
         # Stop latency test process before closing
         if hasattr(self, 'latency_process') and self.latency_process is not None:
@@ -4216,92 +4142,173 @@ class JackConnectionManager(QMainWindow):
             # If no tree has focus, focus the first one
             trees[0].setFocus()
 
-    def setup_shortcuts(self):
-        """Create and connect keyboard shortcuts."""
+    def _setup_actions(self):
+        """Define all QAction objects for shortcuts and context menus."""
         # Connect Shortcut (c)
-        connect_action = QAction("Connect Shortcut", self)
-        connect_action.setShortcut(QKeySequence(Qt.Key.Key_C))
-        connect_action.triggered.connect(self._handle_connect_shortcut)
-        self.addAction(connect_action)
+        self.connect_action = QAction("Connect Shortcut", self)
+        self.connect_action.setShortcut(QKeySequence(Qt.Key.Key_C))
+        self.connect_action.triggered.connect(self._handle_connect_shortcut)
 
-        # Disconnect Shortcut (d)
-        disconnect_action = QAction("Disconnect Shortcut", self)
-        disconnect_action.setShortcuts([QKeySequence(Qt.Key.Key_D), QKeySequence(Qt.Key.Key_Delete)])
-        disconnect_action.triggered.connect(self._handle_disconnect_shortcut)
-        self.addAction(disconnect_action)
+        # Disconnect Shortcut (d/Delete)
+        self.disconnect_action = QAction("Disconnect Shortcut", self)
+        self.disconnect_action.setShortcuts([QKeySequence(Qt.Key.Key_D), QKeySequence(Qt.Key.Key_Delete)])
+        self.disconnect_action.triggered.connect(self._handle_disconnect_shortcut)
 
         # Undo Shortcut (Ctrl+Z)
-        undo_shortcut_action = QAction("Undo Shortcut", self)
-        undo_shortcut_action.setShortcut(QKeySequence.StandardKey.Undo) # Standard Ctrl+Z
-        undo_shortcut_action.triggered.connect(self.undo_action)
-        self.addAction(undo_shortcut_action)
+        self.undo_shortcut_action = QAction("Undo Shortcut", self)
+        self.undo_shortcut_action.setShortcut(QKeySequence.StandardKey.Undo) # Standard Ctrl+Z
+        self.undo_shortcut_action.triggered.connect(self.undo_action)
 
         # Redo Shortcut (Ctrl+Y / Ctrl+Shift+Z)
-        redo_shortcut_action = QAction("Redo Shortcut", self)
-        # Set both standard Redo (often Ctrl+Shift+Z) and explicit Ctrl+Y
-        redo_shortcut_action.setShortcuts([QKeySequence.StandardKey.Redo, QKeySequence("Ctrl+Y")])
-        redo_shortcut_action.triggered.connect(self.redo_action)
-        self.addAction(redo_shortcut_action)
+        self.redo_shortcut_action = QAction("Redo Shortcut", self)
+        self.redo_shortcut_action.setShortcuts([QKeySequence.StandardKey.Redo, QKeySequence("Ctrl+Y")])
+        self.redo_shortcut_action.triggered.connect(self.redo_action)
 
         # Refresh Shortcut (r)
-        refresh_shortcut_action = QAction("Refresh Shortcut", self)
-        refresh_shortcut_action.setShortcut(QKeySequence(Qt.Key.Key_R))
-        refresh_shortcut_action.triggered.connect(self.refresh_ports) # Connects to the shared refresh method
-        self.addAction(refresh_shortcut_action)
+        self.refresh_shortcut_action = QAction("Refresh Shortcut", self)
+        self.refresh_shortcut_action.setShortcut(QKeySequence(Qt.Key.Key_R))
+        self.refresh_shortcut_action.triggered.connect(lambda: self.refresh_ports(from_shortcut=True))
 
         # Collapse All Shortcut (Alt+C)
-        collapse_all_shortcut_action = QAction("Collapse All Shortcut", self)
-        collapse_all_shortcut_action.setShortcut(QKeySequence("Alt+C"))
-        collapse_all_shortcut_action.triggered.connect(self._handle_collapse_all_shortcut)
-        self.addAction(collapse_all_shortcut_action)
+        self.collapse_all_shortcut_action = QAction("Collapse All Shortcut", self)
+        self.collapse_all_shortcut_action.setShortcut(QKeySequence("Alt+C"))
+        self.collapse_all_shortcut_action.triggered.connect(self._handle_collapse_all_shortcut)
 
         # Auto Refresh Shortcut (Alt+R)
-        auto_refresh_shortcut_action = QAction("Auto Refresh Shortcut", self)
-        auto_refresh_shortcut_action.setShortcut(QKeySequence("Alt+R"))
-        auto_refresh_shortcut_action.triggered.connect(self._handle_auto_refresh_shortcut)
-        self.addAction(auto_refresh_shortcut_action)
+        self.auto_refresh_shortcut_action = QAction("Auto Refresh Shortcut", self)
+        self.auto_refresh_shortcut_action.setShortcut(QKeySequence("Alt+R"))
+        self.auto_refresh_shortcut_action.triggered.connect(self._handle_auto_refresh_shortcut)
 
         # Untangle Shortcut (Alt+U)
-        untangle_shortcut_action = QAction("Untangle Shortcut", self)
-        untangle_shortcut_action.setShortcut(QKeySequence("Alt+U"))
-        untangle_shortcut_action.triggered.connect(self._handle_untangle_shortcut)
-        self.addAction(untangle_shortcut_action)
+        self.untangle_shortcut_action = QAction("Untangle Shortcut", self)
+        self.untangle_shortcut_action.setShortcut(QKeySequence("Alt+U"))
+        self.untangle_shortcut_action.triggered.connect(self._handle_untangle_shortcut)
 
         # Font Size Increase Shortcut (Ctrl++/Ctrl+=)
-        increase_font_action = QAction("Increase Font Size", self)
-        # Add multiple potential shortcuts for increasing font size
-        increase_font_action.setShortcuts([
+        self.increase_font_action = QAction("Increase Font Size", self)
+        self.increase_font_action.setShortcuts([
             QKeySequence.StandardKey.ZoomIn, # Standard Ctrl++
             QKeySequence("Ctrl++"),
             QKeySequence("Ctrl+=")
         ])
-        increase_font_action.triggered.connect(self.increase_font_size)
-        self.addAction(increase_font_action)
+        self.increase_font_action.triggered.connect(self.increase_font_size)
 
         # Font Size Decrease Shortcut (Ctrl+-)
-        decrease_font_action = QAction("Decrease Font Size", self)
-        decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut) # Standard Ctrl+-
-        decrease_font_action.triggered.connect(self.decrease_font_size)
-        self.addAction(decrease_font_action)
+        self.decrease_font_action = QAction("Decrease Font Size", self)
+        self.decrease_font_action.setShortcut(QKeySequence.StandardKey.ZoomOut) # Standard Ctrl+-
+        self.decrease_font_action.triggered.connect(self.decrease_font_size)
+
         # Tab key for switching focus between trees
-        tab_switch_action = QAction("Switch Focus Forwards", self)
-        tab_switch_action.setShortcut(QKeySequence(Qt.Key.Key_Tab))
-        tab_switch_action.triggered.connect(lambda: self._switch_focus_between_trees(forwards=True))
-        self.addAction(tab_switch_action)
+        self.tab_switch_action = QAction("Switch Focus Forwards", self)
+        self.tab_switch_action.setShortcut(QKeySequence(Qt.Key.Key_Tab))
+        self.tab_switch_action.triggered.connect(lambda: self._switch_focus_between_trees(forwards=True))
 
         # Shift+Tab for switching focus in reverse
-        tab_switch_back_action = QAction("Switch Focus Backwards", self)
-        tab_switch_back_action.setShortcut(QKeySequence(Qt.Key.Key_Backtab))  # Backtab is Shift+Tab
-        tab_switch_back_action.triggered.connect(lambda: self._switch_focus_between_trees(forwards=False))
-        self.addAction(tab_switch_back_action)
+        self.tab_switch_back_action = QAction("Switch Focus Backwards", self)
+        self.tab_switch_back_action.setShortcut(QKeySequence(Qt.Key.Key_Backtab))  # Backtab is Shift+Tab
+        self.tab_switch_back_action.triggered.connect(lambda: self._switch_focus_between_trees(forwards=False))
 
+        # --- Preset Shortcuts (Global) ---
+        # Save Preset Shortcut (Ctrl+S)
+        self.save_preset_action = QAction("Save Preset Shortcut", self)
+        self.save_preset_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.save_preset_action.triggered.connect(self.preset_handler._save_current_loaded_preset)
+        self.save_preset_action.setEnabled(False) # Initially disabled
+
+        # Default Preset Shortcut (Ctrl+Shift+R)
+        self.default_preset_action = QAction("Default Preset Shortcut", self)
+        self.default_preset_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.default_preset_action.triggered.connect(self.preset_handler._handle_default_preset_action)
+
+        # --- PortTreeWidget Actions (Move Up/Down) ---
+        self.move_group_up_action = QAction("Move Up", self)
+        self.move_group_up_action.setShortcut(QKeySequence("Alt+Up"))
+        self.move_group_up_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut) # Context needed
+        self.move_group_up_action.triggered.connect(self._handle_move_group_up)
+
+        self.move_group_down_action = QAction("Move Down", self)
+        self.move_group_down_action.setShortcut(QKeySequence("Alt+Down"))
+        self.move_group_down_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut) # Context needed
+        self.move_group_down_action.triggered.connect(self._handle_move_group_down)
+
+    def _get_focused_tree_widget(self):
+        """Finds which PortTreeWidget currently has focus."""
+        focused_widget = QApplication.focusWidget()
+        if isinstance(focused_widget, PortTreeWidget):
+            return focused_widget
+        # Check parents if focus is on a child widget within the tree
+        while focused_widget is not None:
+            if isinstance(focused_widget, PortTreeWidget):
+                return focused_widget
+            focused_widget = focused_widget.parent()
+        return None
+
+    def _handle_move_group_up(self):
+        """Handles the global 'Move Up' action trigger."""
+        focused_tree = self._get_focused_tree_widget()
+        if focused_tree:
+            item = focused_tree.currentItem()
+            if item and item.parent() is None: # Only move top-level items (groups)
+                focused_tree.move_group_up(item)
+
+    def _handle_move_group_down(self):
+        """Handles the global 'Move Down' action trigger."""
+        focused_tree = self._get_focused_tree_widget()
+        if focused_tree:
+            item = focused_tree.currentItem()
+            if item and item.parent() is None: # Only move top-level items (groups)
+                focused_tree.move_group_down(item)
+
+    def setup_shortcuts(self):
+        """Add the pre-defined QAction objects (with shortcuts) to the main window."""
+        # Actions are defined in _setup_actions
+        self.addAction(self.connect_action)
+        self.addAction(self.disconnect_action)
+        self.addAction(self.undo_shortcut_action)
+        self.addAction(self.redo_shortcut_action)
+        self.addAction(self.refresh_shortcut_action)
+        self.addAction(self.collapse_all_shortcut_action)
+        self.addAction(self.auto_refresh_shortcut_action)
+        self.addAction(self.untangle_shortcut_action)
+        self.addAction(self.increase_font_action)
+        self.addAction(self.decrease_font_action)
+        self.addAction(self.tab_switch_action)
+        self.addAction(self.tab_switch_back_action)
+        self.addAction(self.save_preset_action)
+        self.addAction(self.default_preset_action)
+        self.addAction(self.move_group_up_action)
+        self.addAction(self.move_group_down_action)
+
+
+    def _animate_button_press(self, button):
+        """Animates a button press by briefly changing its style and then restoring it."""
+        if not button:
+            return
+            
+        # Store original style
+        original_style = button.styleSheet()
+        
+        # Apply pressed style
+        pressed_style = f"""
+            QPushButton {{ 
+                background-color: {self.highlight_color.name()}; 
+                color: {self.text_color.name()};
+                border: 2px inset {self.highlight_color.darker(120).name()};
+            }}
+        """
+        button.setStyleSheet(pressed_style)
+        
+        # Restore original style after a short delay
+        QTimer.singleShot(150, lambda: button.setStyleSheet(original_style))
 
     def _handle_connect_shortcut(self):
         """Calls the appropriate connect method based on the current tab."""
         current_index = self.tab_widget.currentIndex()
         if current_index == 0: # Audio Tab
+            self._animate_button_press(self.connect_button)
             self.make_connection_selected()
         elif current_index == 1: # MIDI Tab
+            self._animate_button_press(self.midi_connect_button)
             self.make_midi_connection_selected()
         # Ignore if on other tabs
 
@@ -4309,8 +4316,10 @@ class JackConnectionManager(QMainWindow):
         """Calls the appropriate disconnect method based on the current tab."""
         current_index = self.tab_widget.currentIndex()
         if current_index == 0: # Audio Tab
+            self._animate_button_press(self.disconnect_button)
             self.break_connection_selected()
         elif current_index == 1: # MIDI Tab
+            self._animate_button_press(self.midi_disconnect_button)
             self.break_midi_connection_selected()
         # Ignore if on other tabs
 
@@ -4320,11 +4329,13 @@ class JackConnectionManager(QMainWindow):
             self.collapse_all_checkbox.toggle()
 
     def _handle_auto_refresh_shortcut(self):
-        pass # Placeholder
+        """Handles the Alt+R shortcut to toggle the auto-refresh checkbox."""
+        if hasattr(self, 'auto_refresh_checkbox'):
+            self.auto_refresh_checkbox.toggle()
     def _update_untangle_button_text(self):
         """Updates the text of the untangle button based on the current mode."""
         modes = {
-            0: "Untangle: Off",
+            0: "Unangle: Off",
             1: "Untangle: >>",
             2: "Untangle: <<"
         }
@@ -4342,32 +4353,13 @@ class JackConnectionManager(QMainWindow):
 
     def _handle_untangle_shortcut(self):
         """Handles the Alt+U shortcut for cycling untangle sort."""
+        # Animate the untangle button press
+        self._animate_button_press(self.untangle_button)
         self.toggle_untangle_sort() # Directly call the cycle method
 
 
-    def _save_current_loaded_preset(self):
-        """Saves the current connections to the currently loaded preset file without confirmation."""
-        if not self.current_preset_name:
-            QMessageBox.warning(self, "Save Preset Error", "No preset is currently loaded.")
-            return
-
-        preset_name = self.current_preset_name
-        print(f"Saving current connections to loaded preset: '{preset_name}'")
-        current_connections = self._get_current_connections()
-        # Pass confirm_overwrite=False to skip the dialog
-        if self.preset_manager.save_preset(preset_name, current_connections, parent_widget=self, confirm_overwrite=False):
-            print(f"Preset '{preset_name}' saved.")
-            show_timed_messagebox(self, QMessageBox.Icon.Information, "Preset Saved", f"Preset '{preset_name}' saved successfully.")
-        # No else needed, save_preset shows critical error message on failure
-
-
-    def _set_startup_preset(self, name):
-       """Sets the selected preset name as the startup preset in the config."""
-       print(f"Setting startup preset to: {name}")
-       self.startup_preset_name = name # Update internal state
-       # Save the actual preset name, or None (which ConfigManager saves as empty string)
-       self.config_manager.set_str('startup_preset', name)
-       # No need to update menu check state here as it's closed
+    # _save_current_loaded_preset moved to PresetHandler
+    # _set_startup_preset moved to PresetHandler
 
 def main():
     # --- Add Argument Parsing ---
@@ -4384,7 +4376,7 @@ def main():
     # --- Create QApplication FIRST ---
     app = QApplication(sys.argv)
     # Set the desktop filename for correct icon display in taskbar and window decorations
-    QGuiApplication.setDesktopFileName("com.example.cable")
+    QGuiApplication.setDesktopFileName("com.github.magillos.cable")
     # --- End QApplication Creation ---
 
     # --- Headless Mode Logic ---
@@ -4394,22 +4386,25 @@ def main():
         # QApplication already exists now
         headless_manager = JackConnectionManager() # Creates client, loads config, but doesn't auto-refresh/load preset
         # Explicitly load startup preset if defined
-        if headless_manager.startup_preset_name and headless_manager.startup_preset_name != 'None':
-            print(f"Headless mode: Attempting to load startup preset '{headless_manager.startup_preset_name}'...")
+        if headless_manager.preset_handler.startup_preset_name and headless_manager.preset_handler.startup_preset_name != 'None': # Use handler state
+            print(f"Headless mode: Attempting to load startup preset '{headless_manager.preset_handler.startup_preset_name}'...") # Use handler state
             # Call load preset, check success
-            success = headless_manager._load_selected_preset(headless_manager.startup_preset_name, is_startup=True)
+            success = headless_manager.preset_handler._load_selected_preset(headless_manager.preset_handler.startup_preset_name, is_startup=True) # Use handler method and state
             if success:
-                print(f"Startup preset '{headless_manager.startup_preset_name}' loaded successfully.")
+                print(f"Startup preset '{headless_manager.preset_handler.startup_preset_name}' loaded successfully.") # Use handler state
                 # Save the successfully loaded preset name to config
-                headless_manager.config_manager.set_str('active_preset', headless_manager.startup_preset_name)
-                print(f"Headless: Set active_preset in config to '{headless_manager.startup_preset_name}'")
+                # _load_selected_preset now handles saving the active preset to config on success
+                # headless_manager.config_manager.set_str('active_preset', headless_manager.preset_handler.current_preset_name) # Use handler state
+                print(f"Headless: Active preset '{headless_manager.preset_handler.current_preset_name}' set in config by load function.") # Use handler state
             else:
-                print(f"Failed to load startup preset '{headless_manager.startup_preset_name}'.")
+                print(f"Failed to load startup preset '{headless_manager.preset_handler.startup_preset_name}'.") # Use handler state
                 # Clear the active preset in config on failure
-                headless_manager.config_manager.set_str('active_preset', None)
-                print("Headless: Cleared active_preset in config due to load failure.")
+                # _load_selected_preset now handles clearing the active preset in config on failure
+                # headless_manager.config_manager.set_str('active_preset', None)
+                print("Headless: Active preset cleared in config by load function due to failure.")
         else:
             print("Headless mode: No startup preset configured.")
+            # Ensure active preset is cleared if none is configured for startup
             # Ensure active preset is cleared if none is configured for startup
             headless_manager.config_manager.set_str('active_preset', None)
             print("Headless: Cleared active_preset in config (no startup preset).")

@@ -3,7 +3,7 @@ PyQT GUI application to dynamically modify Pipewire and Wireplumber settings at 
 Now, with side by side connections manager (uses Python Jack Client so will not list Pipewire items), pw-top and latency test tabs.
 
 
-If you wonder what Latency option does, look [here](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html#alsa-extra-latency-properties). 
+If you wonder what Latency Offset option does, look [here](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/alsa.html#alsa-extra-latency-properties). 
 
 
 
@@ -13,7 +13,8 @@ To run, download Cable.py, connection-manager.py and jack-plug.svg and put them 
 
 Various packages are also available in [releases](https://github.com/magillos/Cable/releases).
 
-For AppImage or pyinstaller bundle you may want to download and place local.cable.Cable.desktop in ~/.local/share/applications/ directory, for better icon integration.
+For AppImage you may want to place cable.desktop in ~/.local/share/applications/ directory, for better icon integration.
+For auto-start to work with AppImage, enable Autostart in tray menu and edit Exec entry in ~/.config/autostart/cable-autostart.desktop to point to your AppImage executable (e.g. Exec=/location/on/disk/./Cable-0.9.4.AppImage --minimized).
 
 You need Pipewire in version 1.0 at least, for connections manager to work.
 

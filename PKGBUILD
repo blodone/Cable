@@ -1,7 +1,7 @@
 # Maintainer:Magillos <kerown at gmail com>
 
 pkgname=cable
-pkgver=0.9.3.1
+pkgver=0.9.4
 pkgrel=1
 pkgdesc="A PyQt6 application to dynamically modify Pipewire and Wireplumber settings"
 arch=('any')
@@ -33,7 +33,7 @@ package() {
   install -Dm644 "jack-plug.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/jack-plug.svg"
 
   # Install the desktop entry
-  install -Dm644 "com.example.cable.desktop" "$pkgdir/usr/share/applications/com.example.cable.desktop"
+  install -Dm644 "com.github.magillos.cable.desktop" "$pkgdir/usr/share/applications/com.github.magillos.cable.desktop"
 
   # Create the /usr/share/cable directory if it doesn't exist
   install -d "$pkgdir/usr/share/cable"
