@@ -1,20 +1,20 @@
 # Maintainer:Magillos <kerown at gmail com>
 
 pkgname=cable
-pkgver=0.9.1
+pkgver=0.9.4
 pkgrel=1
 pkgdesc="A PyQt6 application to dynamically modify Pipewire and Wireplumber settings"
 arch=('any')
 url="https://github.com/magillos/Cable"
 license=('GPL-3.0')
-depends=('python' 'python-pyqt6' 'python-jack-client' 'jack_delay')
+depends=('python' 'python-pyqt6' 'python-jack-client' 'jack_delay' 'python-requests')
 makedepends=('python-setuptools')
 if [ -n "${USE_LOCAL}" ]; then
   source=("${USE_LOCAL_PATH:-./Cable-$pkgver.tar.gz}")
   sha256sums=('SKIP')
 else
   source=("cable-$pkgver.tar.gz::https://github.com/magillos/Cable/archive/refs/tags/$pkgver.tar.gz")
-  sha256sums=('158325f6cfb5f300b1c3880772d7d428f0c7c32c653380fdb2903b08a9ef7a1e')
+  sha256sums=('009d3132d23c61068333b0c82b962c35e87e28a111165643dd66ca2b1f397e57')
 fi
 
 
@@ -33,7 +33,7 @@ package() {
   install -Dm644 "jack-plug.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/jack-plug.svg"
 
   # Install the desktop entry
-  install -Dm644 "com.example.cable.desktop" "$pkgdir/usr/share/applications/com.example.cable.desktop"
+  install -Dm644 "com.github.magillos.cable.desktop" "$pkgdir/usr/share/applications/com.github.magillos.cable.desktop"
 
   # Create the /usr/share/cable directory if it doesn't exist
   install -d "$pkgdir/usr/share/cable"

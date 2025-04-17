@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QSystemTrayIcon, QMenu)
 
 # --- Application Version ---
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.4"
 # -------------------------
 
 class AutostartManager:
@@ -28,7 +28,7 @@ class AutostartManager:
         self.desktop_file = os.path.join(self.autostart_dir, "cable-autostart.desktop")
         
         # Set the appropriate Exec line based on environment
-        exec_line = "/usr/bin/flatpak run com.example.cable --minimized" if flatpak_env else "pw-jack cable --minimized"
+        exec_line = "/usr/bin/flatpak run com.github.magillos.cable --minimized" if flatpak_env else "pw-jack cable --minimized"
         
         self.desktop_content = f"""[Desktop Entry]
 Type=Application
@@ -71,7 +71,7 @@ class CableApp(QApplication):
 
         # Set the desktop filename for Wayland
         # This needs to match your .desktop file name exactly
-        QGuiApplication.setDesktopFileName("com.example.cable")
+        QGuiApplication.setDesktopFileName("com.github.magillos.cable")
 
 
         # Set the application name to match the .desktop file
@@ -94,6 +94,7 @@ class PipeWireSettingsApp(QWidget):
         self.autostart_enabled = False
         self.quantum_was_reset = False
         self.sample_rate_was_reset = False
+        self.check_updates_at_start = False # Default: Do not check for updates on startup
         self.values_initialized = False  # Flag to track if values have been initialized
         
         # Initialize UI first
@@ -117,8 +118,8 @@ class PipeWireSettingsApp(QWidget):
         # Update latency display after everything is loaded
         self.update_latency_display()
 
-        # Check for updates shortly after startup
-        QTimer.singleShot(2000, self.check_for_updates) # Check after 2 seconds
+        # Conditionally check for updates shortly after startup
+        QTimer.singleShot(2000, self._initial_update_check) # Check after 2 seconds if enabled
 
 
     def get_metadata_value(self, key):
@@ -194,7 +195,7 @@ class PipeWireSettingsApp(QWidget):
         quantum_label = QLabel("Quantum/Buffer:")
         self.quantum_combo = QComboBox()
         self.quantum_combo.setEditable(True)
-        quantum_values = [16, 32, 48, 64, 96, 128, 144, 192, 240, 256, 512, 1024, 2048]
+        quantum_values = [16, 32, 48, 64, 96, 128, 144, 192, 240, 256, 512, 1024, 2048, 4096, 8192]
         for value in quantum_values:
             self.quantum_combo.addItem(str(value))
         quantum_select_layout.addWidget(quantum_label)
@@ -212,7 +213,8 @@ class PipeWireSettingsApp(QWidget):
         quantum_buttons_layout.addWidget(self.reset_quantum_button)
 
         self.refresh_quantum_button = QPushButton("Refresh")
-        self.refresh_quantum_button.clicked.connect(self.load_current_settings)
+        self.refresh_quantum_button.clicked.connect(self.refresh_all_settings)
+        self.refresh_quantum_button.setToolTip("Refreshes quantum, as well as sample rate, audio devices and nodes")
         quantum_buttons_layout.addWidget(self.refresh_quantum_button)
 
         quantum_layout.addLayout(quantum_buttons_layout)
@@ -251,7 +253,8 @@ class PipeWireSettingsApp(QWidget):
         sample_rate_buttons_layout.addWidget(self.reset_sample_rate_button)
 
         self.refresh_sample_rate_button = QPushButton("Refresh")
-        self.refresh_sample_rate_button.clicked.connect(self.load_current_settings)
+        self.refresh_sample_rate_button.clicked.connect(self.refresh_all_settings)
+        self.refresh_sample_rate_button.setToolTip("Refreshes sample rate, as well as quantum, audio devices and nodes")
         sample_rate_buttons_layout.addWidget(self.refresh_sample_rate_button)
 
         sample_rate_layout.addLayout(sample_rate_buttons_layout)
@@ -282,7 +285,7 @@ class PipeWireSettingsApp(QWidget):
         latency_layout.addWidget(self.apply_latency_button)
         self.latency_input.returnPressed.connect(self.apply_latency_settings)
 
-        main_layout.addWidget(self.create_section_group("Latency", latency_layout))
+        main_layout.addWidget(self.create_section_group("Latency Offset", latency_layout))
 
         # Restart Buttons Section
         restart_layout = QVBoxLayout()
@@ -341,10 +344,14 @@ class PipeWireSettingsApp(QWidget):
         version_layout.addStretch() # Push label to the right
         self.version_label = QLabel()
         self.version_label.setTextFormat(Qt.TextFormat.RichText) # Allow HTML links
-        self.version_label.setOpenExternalLinks(True) # Make links clickable
+        # self.version_label.setOpenExternalLinks(True) # Disabled: Left-click now opens menu
+        # Keep the link for styling and potential future use, but click is handled by event filter
         self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: grey; text-decoration: none;">{APP_VERSION}</a>')
         self.version_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        # self.version_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu) # Disabled: Using event filter for left-click
+        # self.version_label.customContextMenuRequested.connect(self.show_version_context_menu) # Disabled: Using event filter for left-click
         version_layout.addWidget(self.version_label)
+        self.version_label.installEventFilter(self) # Add event filter for left-click menu
         main_layout.addLayout(version_layout) # Add to the main layout
 
 
@@ -360,6 +367,7 @@ class PipeWireSettingsApp(QWidget):
         self.saved_quantum = 0
         self.saved_sample_rate = 0
         self.autostart_enabled = False
+        self.check_updates_at_start = False # Default value
 
         if os.path.exists(config_path):
             try:
@@ -390,10 +398,13 @@ class PipeWireSettingsApp(QWidget):
                 
                 # Load autostart setting
                 self.autostart_enabled = config.getboolean('DEFAULT', 'autostart_enabled', fallback=False)
-                
+                # Load startup update check setting
+                self.check_updates_at_start = config.getboolean('DEFAULT', 'check_updates_at_start', fallback=False)
+
                 print(f"Loaded tray_click_opens_cables from config: {tray_click_opens_cables}")
                 print(f"Loaded remember_settings: {self.remember_settings}")
                 print(f"Loaded autostart_enabled: {self.autostart_enabled}")
+                print(f"Loaded check_updates_at_start: {self.check_updates_at_start}")
 
                 # Sync autostart file with config
                 if self.autostart_enabled != self.autostart_manager.is_autostart_enabled():
@@ -453,7 +464,8 @@ class PipeWireSettingsApp(QWidget):
             'tray_enabled': str(self.tray_toggle_checkbox.isChecked()),
             'tray_click_opens_cables': str(self.tray_click_opens_cables),
             'remember_settings': str(self.remember_settings),
-            'autostart_enabled': str(self.autostart_enabled)
+            'autostart_enabled': str(self.autostart_enabled),
+            'check_updates_at_start': str(self.check_updates_at_start) # Save the new setting
         })
         
         # Note: Audio settings (quantum and sample rate) are now saved separately
@@ -704,7 +716,7 @@ class PipeWireSettingsApp(QWidget):
                 else:
                     self.hide()  # Minimize to tray
 
-    def launch_connection_manager(self):
+    def launch_connection_manager(self, headless=False): # Add headless parameter
         """Launch connection-manager.py as an independent process to avoid JACK errors in the main process"""
         try:
             # Define possible paths
@@ -725,20 +737,25 @@ class PipeWireSettingsApp(QWidget):
                 
                 # Connect signals to handle process state
                 self.connection_manager_process.finished.connect(self.on_connection_manager_closed)
-                
+
+                # Prepare arguments
+                arguments = [module_path]
+                if headless:
+                    arguments.append('--headless') # Add headless argument if requested
+
                 # Set up the command
                 if self.flatpak_env:
                     # In Flatpak, we need to use flatpak-spawn to run the Python interpreter
                     self.connection_manager_process.setProgram('flatpak-spawn')
-                    self.connection_manager_process.setArguments(['--host', 'python3', module_path])
+                    self.connection_manager_process.setArguments(['--host', 'python3'] + arguments) # Pass arguments
                 else:
                     # Normal execution
                     self.connection_manager_process.setProgram('python3')
-                    self.connection_manager_process.setArguments([module_path])
-                
+                    self.connection_manager_process.setArguments(arguments) # Pass arguments
+
                 # Start the process
                 self.connection_manager_process.start()
-                print(f"Started connection manager as separate process using {module_path}")
+                print(f"Started connection manager {'headless ' if headless else ''}using {module_path}") # Update log
             else:
                 # Process exists but it might be terminated
                 if self.connection_manager_process.state() == QProcess.ProcessState.NotRunning:
@@ -764,6 +781,15 @@ class PipeWireSettingsApp(QWidget):
             self.hide()
         else:
             event.accept()
+
+    def eventFilter(self, obj, event):
+        """Handle left-clicks on the version label."""
+        if obj is self.version_label and event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.show_version_context_menu(event.pos())
+                return True # Event handled
+        # Pass the event on to the parent class if it's not for the version label or not a left-click
+        return super().eventFilter(obj, event)
 
     def quit_app(self):
         if self.tray_icon:
@@ -1388,6 +1414,13 @@ class PipeWireSettingsApp(QWidget):
         except Exception as e:
             print(f"Error loading settings: {e}")
 
+    def refresh_all_settings(self):
+        """Refreshes quantum, sample rate, devices, and nodes."""
+        print("Refreshing all settings...") # Debug print
+        self.load_current_settings()
+        self.load_devices()
+        self.load_nodes()
+
     def run_command(self, command_args, check_output=True):
         """Generic command runner with Flatpak support"""
         if self.flatpak_env:
@@ -1438,6 +1471,14 @@ class PipeWireSettingsApp(QWidget):
             QMessageBox.critical(self, "Error",
                               f"Error toggling autostart: {str(e)}")
 
+    def _initial_update_check(self):
+        """Performs the update check only if the setting is enabled."""
+        if self.check_updates_at_start:
+            print("Performing initial update check as configured...")
+            self.check_for_updates()
+        else:
+            print("Skipping initial update check as configured.")
+
     def check_for_updates(self):
         """Checks GitHub for newer versions and updates the version label color."""
         print("Checking for updates...")
@@ -1449,6 +1490,9 @@ class PipeWireSettingsApp(QWidget):
 
             if not tags:
                 print("No tags found on GitHub.")
+                # Indicate check completed, no update found
+                self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: grey; text-decoration: none;">{APP_VERSION}</a>')
+                # QMessageBox.information(self, "Update Check", "Could not find any release tags on GitHub.") # Removed popup
                 return
 
             # Extract version numbers from tag names (assuming tags are like 'vX.Y.Z' or 'X.Y.Z')
@@ -1468,26 +1512,69 @@ class PipeWireSettingsApp(QWidget):
                 print(f"Current version: {current_app_version}, Latest GitHub version: {latest_version}")
                 if latest_version > current_app_version:
                     print("Newer version found!")
-                    # Update label style to red and add update info
+                    # Update label style to orange and add update info
                     self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: orange; text-decoration: none;">{APP_VERSION} (Update available: {latest_version})</a>')
+                    # QMessageBox.information(self, "Update Available", f"A newer version ({latest_version}) is available!") # Removed popup
                 else:
                     print("Application is up to date.")
                     # Ensure label is default color (grey) if already up-to-date
                     self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: grey; text-decoration: none;">{APP_VERSION}</a>')
+                    # QMessageBox.information(self, "Update Check", "You are running the latest version.") # Removed popup
             else:
                 print("Could not determine the latest version from tags.")
+                self.version_label.setText(f'<a href="https://github.com/magillos/Cable/releases" style="color: grey; text-decoration: none;">{APP_VERSION}</a>')
+                # QMessageBox.warning(self, "Update Check", "Could not determine the latest version from the available tags.") # Removed popup
+
 
         except requests.exceptions.RequestException as e:
             # Handle network errors, timeouts, etc.
             print(f"Error checking for updates (network issue): {e}")
+            # QMessageBox.warning(self, "Update Check Failed", f"Could not check for updates:\n{e}") # Removed popup
             # Optionally update the label to indicate the check failed
             # self.version_label.setText(f'<span style="color: orange;">{APP_VERSION} (Update check failed)</span>')
         except json.JSONDecodeError as e:
             print(f"Error checking for updates (invalid JSON response): {e}")
+            # QMessageBox.warning(self, "Update Check Failed", f"Received an invalid response from GitHub:\n{e}") # Removed popup
         except Exception as e:
             # Catch any other unexpected errors
             print(f"An unexpected error occurred during update check: {e}")
+            # QMessageBox.critical(self, "Update Check Error", f"An unexpected error occurred:\n{e}") # Removed popup
 
+    def show_version_context_menu(self, pos):
+        """Shows the context menu for the version label."""
+        context_menu = QMenu(self)
+
+        check_now_action = QAction("Check for new version", self)
+        check_now_action.triggered.connect(self.check_for_updates)
+        context_menu.addAction(check_now_action)
+
+        download_action = QAction("Download from GitHub", self)
+        download_action.triggered.connect(self.open_download_page)
+        context_menu.addAction(download_action)
+
+        context_menu.addSeparator()
+
+        # Checkable action to toggle startup check
+        startup_check_action = QAction("Check for new version at start", self)
+        startup_check_action.setCheckable(True)
+        startup_check_action.setChecked(self.check_updates_at_start)
+        startup_check_action.toggled.connect(self.toggle_startup_check)
+        context_menu.addAction(startup_check_action)
+
+        # Show the menu at the global position of the click
+        context_menu.exec(self.version_label.mapToGlobal(pos))
+
+    def toggle_startup_check(self, checked):
+        """Updates the startup check setting and saves it."""
+        self.check_updates_at_start = checked
+        print(f"Set check_updates_at_start to: {self.check_updates_at_start}")
+        self.save_settings()
+
+    def open_download_page(self):
+        """Opens the GitHub releases page in the default web browser."""
+        url = "https://github.com/magillos/Cable/releases"
+        print(f"Opening download page: {url}")
+        webbrowser.open(url)
 
 def main():
     # Parse command line arguments
@@ -1512,6 +1599,9 @@ def main():
         ex.hide()
         # Force a complete refresh of settings after a short delay
         # This simulates clicking the "Refresh" button when starting minimized
+        # Also launch connection manager to load startup preset if configured
+        print("Cable started minimized, launching connection manager...") # Add log
+        ex.launch_connection_manager(headless=True) # Pass headless=True when Cable starts minimized
         QTimer.singleShot(1000, ex.load_current_settings)
     else:
         # Show window normally
