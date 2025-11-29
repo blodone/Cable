@@ -35,6 +35,9 @@ class AlsMixerApp(QWidget):
     def __init__(self, config_manager=None):
         super().__init__()
         
+        # Initialize debug_mode early to prevent AttributeError when pyalsaaudio is not available
+        self.debug_mode = False
+        
         if alsaaudio is None:
             self.init_error_ui("ALSA wrappers for Python not available")
             return
@@ -276,7 +279,8 @@ class AlsMixerApp(QWidget):
 
         try:
             alsa_cards_short_names = alsaaudio.cards() if alsaaudio else []
-            if not alsa_cards_short_names:
+            alsa_card_indexes = alsaaudio.card_indexes() if alsaaudio else []
+            if not alsa_cards_short_names or not alsa_card_indexes:
                 self.card_combo.addItem("No cards found")
                 self.card_combo.setEnabled(False)
                 QMessageBox.information(self, "Info", "No sound cards found.")
@@ -286,18 +290,18 @@ class AlsMixerApp(QWidget):
 
             self.card_name_to_index_map = {}
 
-            for i, short_name in enumerate(alsa_cards_short_names):
-                descriptive_name = self._get_long_card_name(i, f"{short_name} (hw:{i})")
-                display_text = f"{descriptive_name}" 
-                
+            for card_index, short_name in zip(alsa_card_indexes, alsa_cards_short_names):
+                descriptive_name = self._get_long_card_name(card_index, f"{short_name} (hw:{card_index})")
+                display_text = f"{descriptive_name}"
+
                 original_display_text = display_text
                 counter = 1
                 while display_text in self.card_name_to_index_map:
                     display_text = f"{original_display_text} ({counter})"
                     counter += 1
-                
-                self.card_combo.addItem(display_text, userData=i)
-                self.card_name_to_index_map[display_text] = i
+
+                self.card_combo.addItem(display_text, userData=card_index)
+                self.card_name_to_index_map[display_text] = card_index
 
             self.card_combo.setEnabled(True)
 
@@ -576,26 +580,33 @@ class AlsMixerApp(QWidget):
         self._is_updating_ui = False
 
     def refresh_all_mixer_states(self):
+        if not alsaaudio:
+            return
         if self._is_updating_ui: return; print("Refreshing all mixer states...") if self.debug_mode else None; self._is_updating_ui = True
         for key in list(self.mixer_controls_data.keys()): self.refresh_specific_mixer_state(key)
         self._is_updating_ui = False
  
     def start_updates(self):
         """Starts the ALSA mixer update mechanisms (timer or notifiers)."""
+        if not alsaaudio:
+            return
         print("ALSA Mixer: Starting updates...") if self.debug_mode else None
         # Re-populate cards to ensure correct state and setup notifiers/timer
         self.populate_cards()
  
     def stop_updates(self):
         """Stops the ALSA mixer update mechanisms (timer and notifiers)."""
+        if not alsaaudio:
+            return
         print("ALSA Mixer: Stopping updates...") if self.debug_mode else None
         self.update_timer.stop()
         self._cleanup_notifiers()
         self.clear_mixer_controls_ui() # Clear UI when stopping updates
  
     def closeEvent(self, event):
-        self._cleanup_notifiers()
-        self.clear_mixer_controls_ui()
+        if alsaaudio:
+            self._cleanup_notifiers()
+            self.clear_mixer_controls_ui()
         event.accept()
 
     def _setup_mixer_notifiers(self, mixer_name, mixer_obj):
@@ -662,6 +673,8 @@ class AlsMixerApp(QWidget):
                 print(f"Notifier for {mixer_name} (fd: {fd}) re-enabled.")
  
     def _cleanup_notifiers(self):
+        if not alsaaudio:
+            return
         for mixer_name, notifiers in self.mixer_notifiers.items():
             for notifier in notifiers:
                 notifier.setEnabled(False)

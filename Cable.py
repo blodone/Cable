@@ -1,4 +1,5 @@
 import sys
+import signal
 import subprocess
 import json
 import re
@@ -20,6 +21,7 @@ from cable_core.process import ProcessManager
 from cable_core.updates import UpdateManager # Added import
 from cable_core.app_config import APP_VERSION # Import APP_VERSION
 from cable_core import app_config
+from cables.config.preset_manager import PresetManager
 from PyQt6.QtCore import Qt, QTimer, QFile, QMargins, QProcess, QEvent
 from PyQt6.QtGui import QFont, QIcon, QGuiApplication, QActionGroup, QAction
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -59,13 +61,15 @@ class PipeWireSettingsApp(QWidget):
         super().__init__()
         self.is_minimized_startup = is_minimized_startup # Store the flag
         self.flatpak_env = os.path.exists('/.flatpak-info')
+        self.appimage_path = self._detect_appimage_path()  # Detect AppImage path
         self.tray_icon = None  # Initialize tray_icon here
         self.tray_enabled = False
         self.connection_manager_process = None
         self.tray_click_opens_cables = True
         self.profile_index_map = {}
         self.cables_executable_path = None  # Will be set during init
-        self.autostart_manager = AutostartManager(self.flatpak_env)
+        # Initialize autostart manager (will be updated after config is loaded)
+        self.autostart_manager = AutostartManager(self.flatpak_env, self.appimage_path)
         # Instantiate ConfigManager *after* UI elements and AutostartManager are initialized
         self.config_manager = ConfigManager(self)
         self.system_manager = SystemManager(self) # Instantiate SystemManager
@@ -116,11 +120,26 @@ class PipeWireSettingsApp(QWidget):
         # Mark values as initialized
         self.values_initialized = True
 
+        # Update autostart manager with configured AppImage path
+        appimage_path_to_use = self.appimage_path if self.appimage_path else self._detect_appimage_path()
+        if appimage_path_to_use:
+            # Use configured path if available, otherwise use detected path
+            self.autostart_manager = AutostartManager(self.flatpak_env, appimage_path_to_use)
+
         # Update latency display after everything is loaded
         self.update_latency_display()
 
         # Conditionally check for updates shortly after startup
         QTimer.singleShot(2000, self.update_manager._initial_update_check) # Check after 2 seconds if enabled (using UpdateManager)
+
+    def _detect_appimage_path(self):
+        """Detect if the application is running from an AppImage and return the path."""
+        # Check for APPIMAGE environment variable (set by AppImage runtime)
+        appimage_path = os.environ.get('APPIMAGE')
+        if appimage_path and os.path.exists(appimage_path):
+            print(f"Detected AppImage path: {appimage_path}")
+            return appimage_path
+        return None
 
     # --- Method moved to PipewireManager ---
     # get_metadata_value (Removed)
@@ -195,11 +214,13 @@ class PipeWireSettingsApp(QWidget):
         # Ensure the config file exists and has the keys before reading (handled by ConfigManager now)
         # self.config_manager.ensure_config_lists() # Called during init
 
+        # Get all values from config (including commented ones) to show in dialog
+        all_values = self.config_manager.get_all_values_from_config(config_key, default_values_list)
         # Get currently active values from config using the manager
         active_values = self.config_manager.get_list_from_config(config_key, default_values_list)
 
         # Show the dialog
-        dialog = ValueSelectorDialog(f"Select Active {title} Values", default_values_list, active_values, self)
+        dialog = ValueSelectorDialog(f"Select Active {title} Values", all_values, active_values, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             selected_values = dialog.get_selected_values()
             print(f"Dialog accepted for {title}. Selected values: {selected_values}")
@@ -214,7 +235,7 @@ class PipeWireSettingsApp(QWidget):
 
                 # Construct the new comma-separated string, commenting out unselected values
                 new_value_parts = []
-                for val in default_values_list:
+                for val in all_values:  # Use all_values instead of default_values_list
                     if val in selected_values:
                         new_value_parts.append(str(val))
                     else:
@@ -223,7 +244,7 @@ class PipeWireSettingsApp(QWidget):
                 config['DEFAULT'][config_key] = ','.join(new_value_parts)
 
                 # Write the updated config back using the manager's helper
-                self.config_manager._write_config(config, config_path)
+                self.config_manager._write_config(config)
                 print(f"Updated '{config_key}' in {config_path}")
 
                 # Refresh the UI to reflect changes
@@ -437,7 +458,7 @@ class PipeWireSettingsApp(QWidget):
 
     def closeEvent(self, event):
         # If tray is enabled, hide the window instead of closing
-        if self.tray_enabled and self.tray_manager.tray_icon: # Check manager's icon
+        if self.tray_enabled and self.tray_manager.tray_icon and self.tray_manager.tray_icon.isVisible():
             event.ignore()
             self.hide()
         else:
@@ -609,6 +630,13 @@ class PipeWireSettingsApp(QWidget):
             # Ensure signals are unblocked
             self.sample_rate_combo.blockSignals(False)
 
+    def cleanup_before_quit(self):
+        """Clean up resources before quitting."""
+        print("Performing cleanup before quitting...")
+        # Stop the daemon directly
+        preset_manager = PresetManager() # Create an instance to access the stop method
+        preset_manager.stop_daemon_mode()
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Cable - PipeWire Settings Manager')
@@ -621,6 +649,17 @@ def main():
     
     # Create main window, passing the minimized flag
     ex = PipeWireSettingsApp(is_minimized_startup=args.minimized)
+
+    # Connect the cleanup function to the application's quit signal
+    app.aboutToQuit.connect(ex.cleanup_before_quit)
+
+    # Set up a signal handler for SIGINT (Ctrl+C) to gracefully quit
+    signal.signal(signal.SIGINT, lambda sig, frame: app.quit())
+
+    # Use a timer to allow the Python interpreter to process signals
+    timer = QTimer()
+    timer.start(100)  # Check for signals every 100ms
+    timer.timeout.connect(lambda: None)  # No-op to wake up the interpreter
     
     # Handle initial window state
     if args.minimized:

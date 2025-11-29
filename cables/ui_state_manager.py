@@ -167,14 +167,14 @@ class UIStateManager(QObject):
         if not self._callbacks_enabled: # Only adjust if auto-refresh is on
              return
 
-        if not self.main_window or not hasattr(self.main_window, 'tab_widget'):
-            logger.warning("Cannot update timer interval: main window or tab widget missing.")
+        if not self.main_window or not hasattr(self.main_window.ui_manager, 'tab_widget'):
+            logger.warning("Cannot update timer interval: main window or ui_manager.tab_widget missing.")
             return
 
         # Determine interval based on focus and tab using constants from app_config
         interval = app_config.REFRESH_RATE_UNFOCUSED_MS # Default unfocused
         if self._is_focused:
-            current_index = self.main_window.tab_widget.currentIndex()
+            current_index = self.main_window.ui_manager.tab_widget.currentIndex()
             # Indices for tabs that should use the slower refresh rate when focused
             special_tabs_indices = [2, 3, 4, 5] # Graph, Alsa Mixer, pw-top, Latency Test
             if current_index in [0, 1]: # Audio or MIDI tab
@@ -318,6 +318,7 @@ class UIStateManager(QObject):
     def increase_font_size(self):
         """Increases the font size for the port lists."""
         if not self._callbacks_enabled: return
+
         max_font_size = self.config_manager.get_int('max_font_size', 24) if self.config_manager else 24
         if self._port_list_font_size < max_font_size:
             self._port_list_font_size += 1
@@ -325,11 +326,11 @@ class UIStateManager(QObject):
             self._apply_port_list_font_size()
             if self.config_manager:
                 self.config_manager.set_str('port_list_font_size', str(self._port_list_font_size))
-            # Emit signal if defined: self.font_size_changed.emit(self._port_list_font_size)
 
     def decrease_font_size(self):
         """Decreases the font size for the port lists."""
         if not self._callbacks_enabled: return
+
         min_font_size = self.config_manager.get_int('min_font_size', 6) if self.config_manager else 6
         if self._port_list_font_size > min_font_size:
             self._port_list_font_size -= 1
@@ -337,7 +338,6 @@ class UIStateManager(QObject):
             self._apply_port_list_font_size()
             if self.config_manager:
                 self.config_manager.set_str('port_list_font_size', str(self._port_list_font_size))
-            # Emit signal if defined: self.font_size_changed.emit(self._port_list_font_size)
 
     def _apply_port_list_font_size(self):
         """Applies the current font size to the port list tree widgets."""

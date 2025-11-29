@@ -105,21 +105,47 @@ class NodeSplitHandler:
         # 4. Set DEFAULT positions for new nodes.
         input_node.layout_ports()
         output_node.layout_ports()
+        
+        # Force geometry update to ensure boundingRect is accurate
+        input_node.prepareGeometryChange()
+        input_node.update()
+        output_node.prepareGeometryChange()
+        output_node.update()
+        
         # Set both split parts to same Y-coordinate as original node
-        input_node.setPos(QPointF(original_pos.x(), original_pos.y()))
-        output_node.setPos(QPointF(
-            original_pos.x() + input_node.boundingRect().width() + constants.NODE_HSPACING,
-            original_pos.y()
-        ))
+        input_x = original_pos.x()
+        input_y = original_pos.y()
+        output_x = original_pos.x() + input_node.boundingRect().width() + constants.NODE_HSPACING
+        output_y = original_pos.y()
+        
+        # Check for overlaps and find non-overlapping positions if needed
+        if scene.layouter:
+            input_x, input_y = scene.layouter.find_non_overlapping_position(input_node, input_x, input_y)
+            output_x, output_y = scene.layouter.find_non_overlapping_position(output_node, output_x, output_y)
+        
+        input_node.setPos(QPointF(input_x, input_y))
+        output_node.setPos(QPointF(output_x, output_y))
+        
+        # Defer push-away check until after nodes are fully laid out
+        # This is important for complex nodes with many ports
+        if hasattr(scene, '_apply_push_away_for_node'):
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: scene._apply_push_away_for_node(input_node))
+            QTimer.singleShot(0, lambda: scene._apply_push_away_for_node(output_node))
         
         # 5. Mark original node as split, store references, and HIDE it
         ni.is_split_origin = True
         ni.split_input_node = input_node
         ni.split_output_node = output_node
 
-        if ni.is_folded: # Original node was folded
-            input_node.input_part_folded = True
-            output_node.output_part_folded = True
+        # Initialize fold state for split parts
+        # Split parts start unfolded by default, regardless of original node state
+        input_node.input_part_folded = False
+        output_node.output_part_folded = False
+        
+        # If the original node was folded, we could inherit that state, but it's better
+        # to start unfolded so users can see the ports after splitting
+        if ni.is_folded:
             ni.is_folded = False # Origin itself is not "folded" in the same way
 
         input_node.layout_ports() # Update layout for potential fold
@@ -195,6 +221,9 @@ class NodeSplitHandler:
         ni._internal_state_change_in_progress = False
         if save_state and scene and hasattr(scene, 'request_specific_node_save'):
             scene.request_specific_node_save(ni) # Save state of the original node
+        # Notify listeners that node states changed
+        if save_state and scene and hasattr(scene, 'node_states_changed'):
+            scene.node_states_changed.emit()
 
     def unsplit_node(self, save_state: bool = True):
         """
@@ -333,6 +362,9 @@ class NodeSplitHandler:
         ni._internal_state_change_in_progress = False
         if save_state and scene and hasattr(scene, 'request_specific_node_save'):
             scene.request_specific_node_save(ni)
+        # Notify listeners that node states changed
+        if save_state and scene and hasattr(scene, 'node_states_changed'):
+            scene.node_states_changed.emit()
 
     def apply_split_config(self, config: dict):
         """

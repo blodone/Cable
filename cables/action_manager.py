@@ -76,10 +76,10 @@ class ActionManager:
         self.global_disconnect_action = QAction("Disconnect Shortcut", self.main_window)
         self.global_disconnect_action.setShortcuts([QKeySequence(Qt.Key.Key_D), QKeySequence(Qt.Key.Key_Delete)])
 
-        self.global_undo_action = QAction("Undo Shortcut", self.main_window)
+        self.global_undo_action = QAction("Undo", self.main_window)
         self.global_undo_action.setShortcut(QKeySequence.StandardKey.Undo)
 
-        self.global_redo_action = QAction("Redo Shortcut", self.main_window)
+        self.global_redo_action = QAction("Redo", self.main_window)
         self.global_redo_action.setShortcuts([QKeySequence.StandardKey.Redo, QKeySequence("Ctrl+Y")])
 
         # --- Port Tab Specific Actions (Audio/MIDI) ---
@@ -198,7 +198,7 @@ class ActionManager:
         
         # Ensure state_manager is available before connecting signals that use it
         if self.state_manager:
-            self.untangle_shortcut_action.triggered.connect(self.state_manager._handle_untangle_shortcut)
+            self.untangle_shortcut_action.triggered.connect(self._handle_global_untangle_shortcut)
         else:
             print("ActionManager: state_manager not available for untangle_shortcut_action connection.")
 
@@ -550,7 +550,6 @@ class ActionManager:
         return list(connected_ports)
 
     def _handle_increase_font_size(self):
-        """Handles the increase font size action, only applying if Audio or MIDI tab is active."""
         tab_widget = self.ui.get('tab_widget')
         if not tab_widget: return
 
@@ -560,10 +559,14 @@ class ActionManager:
             return
 
         current_index = tab_widget.currentIndex()
-
-        if current_index == 0 or current_index == 1:  # Audio Tab (0) or MIDI Tab (1)
+        current_tab_text = tab_widget.tabText(current_index)
+    
+        if current_tab_text in ["Audio", "MIDI"]:
             self.state_manager.increase_font_size()
-        elif current_index == 2: # Graph Tab
+        elif current_tab_text == "MIDI Matrix":
+            if 'midi_matrix_widget' in self.ui and self.ui['midi_matrix_widget']:
+                self.ui['midi_matrix_widget'].zoom_in()
+        elif current_tab_text == "Graph":
             graph_mw = self.ui.get('graph_main_window')
             if graph_mw and hasattr(graph_mw, 'view') and hasattr(graph_mw.view, 'zoom_in'):
                 graph_mw.view.zoom_in()
@@ -581,10 +584,14 @@ class ActionManager:
             return
 
         current_index = tab_widget.currentIndex()
-
-        if current_index == 0 or current_index == 1:  # Audio Tab (0) or MIDI Tab (1)
+        current_tab_text = tab_widget.tabText(current_index)
+    
+        if current_tab_text in ["Audio", "MIDI"]:
             self.state_manager.decrease_font_size()
-        elif current_index == 2: # Graph Tab
+        elif current_tab_text == "MIDI Matrix":
+            if 'midi_matrix_widget' in self.ui and self.ui['midi_matrix_widget']:
+                self.ui['midi_matrix_widget'].zoom_out()
+        elif current_tab_text == "Graph":
             graph_mw = self.ui.get('graph_main_window')
             if graph_mw and hasattr(graph_mw, 'view') and hasattr(graph_mw.view, 'zoom_out'):
                 graph_mw.view.zoom_out()
@@ -611,3 +618,19 @@ class ActionManager:
         graph_mw = self.ui.get('graph_main_window')
         if graph_mw and hasattr(graph_mw, '_handle_graph_redo'):
             graph_mw._handle_graph_redo()
+
+    def _handle_global_untangle_shortcut(self):
+        """Handles the global 'Alt+U' key shortcut for untangle."""
+        tab_widget = self.ui.get('tab_widget')
+        if not tab_widget: return
+        current_index = tab_widget.currentIndex()
+
+        if current_index in [0, 1]:  # Audio or MIDI Tab
+            if self.state_manager:
+                self.state_manager._handle_untangle_shortcut()
+        elif current_index == 3:  # Graph Tab
+            graph_mw = self.ui.get('graph_main_window')
+            if graph_mw and hasattr(graph_mw, 'untangle_action'):
+                if hasattr(graph_mw, 'untangle_button'):
+                    self._animate_button_press(graph_mw.untangle_button)
+                graph_mw.untangle_action.trigger()

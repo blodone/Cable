@@ -5,14 +5,14 @@ import traceback # For error reporting in _split_node
 from PyQt6.QtWidgets import (
     QGraphicsItem, QGraphicsTextItem, QGraphicsPathItem, QMenu,
     QStyleOptionGraphicsItem, QWidget, QStyle, QGraphicsSceneHoverEvent,
-    QMessageBox, QCheckBox, QVBoxLayout, QDialog, QDialogButtonBox, QLabel
+    QMessageBox, QCheckBox, QVBoxLayout, QDialog, QDialogButtonBox, QLabel, QRadioButton
 )
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QPainterPath, QFont, QAction, QPolygonF,
     QFontMetrics, QPalette
 )
 from PyQt6.QtCore import (
-    Qt, QPointF, QRectF, QLineF, QEvent, QSize
+    Qt, QPointF, QRectF, QLineF, QEvent, QSize, QTimer
 )
 
 from . import constants # Import the new constants module
@@ -32,8 +32,24 @@ from .node_split_handler import NodeSplitHandler
 
 def natural_sort_key(port_item: PortItem):
     """
-    Creates a natural sort key that properly handles numeric values in port names.
-    Uses the same sorting logic as cables/port_manager.py.
+    Creates an enhanced sort key that groups ports by base name.
+    Uses the same enhanced sorting logic as cables/port_manager.py.
+    
+    For example, ports like:
+    - input_FL
+    - input_FL-448
+    - input_FL-458
+    - input_FR
+    - input_FR-449
+    - input_FR-459
+    
+    Will be sorted as:
+    - input_FL
+    - input_FR
+    - input_FL-448
+    - input_FR-449
+    - input_FL-458
+    - input_FR-459
     """
     text = port_item.short_name.lower()
     
@@ -43,7 +59,30 @@ def natural_sort_key(port_item: PortItem):
         except ValueError:
             return text.lower()
 
-    return [tryint(part) for part in re.split(r'(\d+)', text)]
+    # Extract base name and suffix from port name
+    # Look for patterns like "input_FL-448" or "output_1-mono"
+    base_name = text
+    suffix = ''
+    
+    # Try to find a suffix pattern (dash followed by numbers/text)
+    suffix_match = re.search(r'[-_](\d+.*?)$', text)
+    if suffix_match:
+        suffix = suffix_match.group(1)
+        base_name = text[:suffix_match.start()]
+    
+    # Create sort key components
+    base_name_key = [tryint(part) for part in re.split(r'(\d+)', base_name)]
+    
+    # For the desired sorting behavior:
+    # 1. First show all base ports (no suffix) sorted by base name
+    # 2. Then show suffixed ports, grouped by suffix value, with base names sorted within each suffix group
+    if suffix:
+        suffix_key = [tryint(part) for part in re.split(r'(\d+)', suffix)]
+        # For suffixed ports: sort by (suffix, base_name)
+        return ([1], suffix_key, base_name_key)  # [1] puts suffixed ports after base ports
+    else:
+        # For base ports: sort by (base_name)
+        return ([0], base_name_key, [])  # [0] puts base ports first
 
 
 # --- Modified Node Item ---
@@ -51,7 +90,7 @@ def natural_sort_key(port_item: PortItem):
 class NodeItem(QGraphicsItem):
     """Represents a JACK client with its ports."""
     # Modify the __init__ signature and logic
-    def __init__(self, client_name, jack_handler, config_manager: ConfigManager, ports_to_add: dict | None = None):
+    def __init__(self, client_name, jack_handler, config_manager: ConfigManager, ports_to_add: dict | None = None, original_client_name: str | None = None):
         super().__init__()
         self.client_name = client_name # This might be the modified name like "Client (Inputs)"
         self.jack_handler = jack_handler
@@ -67,7 +106,7 @@ class NodeItem(QGraphicsItem):
         self.split_input_node: 'NodeItem' | None = None # Reference to the input part (on origin)
         self.split_output_node: 'NodeItem' | None = None # Reference to the output part (on origin)
         self.split_origin_node: 'NodeItem' | None = None # Reference back to origin (on parts)
-        self.original_client_name = None # Store the original JACK client name (for split parts)
+        self.original_client_name = original_client_name if original_client_name else client_name
         self.is_folded = False # New attribute for folding state (primarily for unsplit nodes)
         self._fold_state_initialized_from_config = False # True after fold state is first set from config
         self._header_rect = QRectF() # New attribute to store header rect for double-click
@@ -93,6 +132,23 @@ class NodeItem(QGraphicsItem):
         # Instantiate handlers
         self.fold_handler = NodeFoldHandler(self)
         self.split_handler = NodeSplitHandler(self)
+        self.is_unified = False # Deprecated, kept for legacy compatibility during migration
+        self.unified_virtual_sink_name = None # Deprecated
+        self.unified_module_id = None # Deprecated
+        self.unified_ports_type = None # Deprecated
+
+        # New split unification state
+        self.is_input_unified = False
+        self.is_output_unified = False
+        self.unified_input_sink_name = None
+        self.unified_output_sink_name = None
+        self.unified_input_module_id = None
+        self.unified_output_module_id = None
+        
+        self.unify_input_action = None
+        self.unify_output_action = None
+        self.wait_for_sink_timer = None
+        self.wait_for_sink_retries = 0
 
         # Populate ports based on provided dict or fetch if None
         if ports_to_add is None:
@@ -107,18 +163,61 @@ class NodeItem(QGraphicsItem):
             # Store the original name if this is potentially a split part
             # The caller of __init__ should handle setting this correctly.
  
-            # Ensure layout is calculated at least once if ports are added manually
-            ports_added = False
+            # Ports will be added via add_port, which calls layout_ports if in a scene.
+            # If no ports are added, layout will be handled by the scene after adding the node.
             for port_name, port_obj in ports_to_add.items():
-                if self.add_port(port_name, port_obj):
-                    ports_added = True
-            # add_port calls layout_ports.
-            # Ensure layout runs if no ports were provided (e.g., empty input/output node after init)
-            if not ports_added:
-                 self.layout_ports() # Calculate initial size
+                self.add_port(port_name, port_obj)
 
         # Store the configuration object
         self.config = {}
+
+        # Initialize unified state from config manager if needed
+        # This pre-sets is_unified before apply_configuration is called
+        if config_manager and hasattr(config_manager, 'node_positions_file'):
+            try:
+                import json
+                if config_manager.node_positions_file.exists():
+                    with open(config_manager.node_positions_file, 'r') as f:
+                        saved_data = json.load(f)
+                    client_config = saved_data.get(client_name, {})
+                    
+                    # Load legacy unified state
+                    if client_config.get(config_manager.IS_UNIFIED_KEY, False):
+                        self.is_unified = True # Keep for reference
+                        # Map legacy state to new split state based on unified_ports_type
+                        unified_type = client_config.get(config_manager.UNIFIED_PORTS_TYPE_KEY)
+                        sink_name = client_config.get(config_manager.UNIFIED_SINK_NAME_KEY)
+                        module_id = client_config.get(config_manager.UNIFIED_MODULE_ID_KEY)
+                        
+                        if unified_type == 'input':
+                            self.is_input_unified = True
+                            self.unified_input_sink_name = sink_name
+                            self.unified_input_module_id = module_id
+                        elif unified_type == 'output':
+                            self.is_output_unified = True
+                            self.unified_output_sink_name = sink_name
+                            self.unified_output_module_id = module_id
+                        # If type is None (old generic), we might need to infer or just leave it for apply_configuration
+
+                    # Load new split unified state
+                    if client_config.get(config_manager.IS_INPUT_UNIFIED_KEY, False):
+                        self.is_input_unified = True
+                        self.unified_input_sink_name = client_config.get(config_manager.UNIFIED_INPUT_SINK_NAME_KEY)
+                        self.unified_input_module_id = client_config.get(config_manager.UNIFIED_INPUT_MODULE_ID_KEY)
+
+                    if client_config.get(config_manager.IS_OUTPUT_UNIFIED_KEY, False):
+                        self.is_output_unified = True
+                        self.unified_output_sink_name = client_config.get(config_manager.UNIFIED_OUTPUT_SINK_NAME_KEY)
+                        self.unified_output_module_id = client_config.get(config_manager.UNIFIED_OUTPUT_MODULE_ID_KEY)
+
+            except Exception as e:
+                # Silently fail, unified state will be set by apply_configuration later
+                print(f"Error loading unified state in __init__: {e}")
+                pass
+
+        # Check if this is a virtual sink (do this after initialization)
+        self._check_if_virtual_sink(client_name)
+        print(f"DEBUG: Node {client_name} initialized - is_virtual_sink: {getattr(self, 'is_virtual_sink', False)}, is_unified_sink: {getattr(self, 'is_unified_sink', False)}")
 
     # --- Helper Methods ---
     def _is_effectively_folded(self) -> bool:
@@ -134,17 +233,53 @@ class NodeItem(QGraphicsItem):
     def _get_paint_colors(self, option: QStyleOptionGraphicsItem, is_selected: bool) -> tuple[QColor, QColor, QColor, QColor]:
         """Determines the colors for painting the node based on theme and selection."""
         border_color = constants.SELECTION_BORDER_COLOR if is_selected else option.palette.color(QPalette.ColorRole.WindowText)
- 
+
         original_node_body_bg = option.palette.color(QPalette.ColorRole.Base)
         is_light_mode = original_node_body_bg.lightnessF() > 0.7
- 
+
+        # Determine effective unified status
+        is_unified_sink = getattr(self, 'is_unified_sink', False)
+        is_unified = self.is_unified
+
+        # If this is a split part, inherit status from origin
+        if self.is_split_part and self.split_origin_node:
+            if getattr(self.split_origin_node, 'is_unified_sink', False):
+                is_unified_sink = True
+            if self.split_origin_node.is_unified:
+                is_unified = True
+
+        if is_unified_sink:
+            # Virtual sinks created by Unify toggle
+            # Check if it's an input or output unified sink based on name
+            if "unified-input" in self.client_name or "unified_input" in self.client_name:
+                # Input Unified Sink -> Green #344b29
+                if is_light_mode:
+                    title_bg_color = QColor(240, 190, 210) # Light green for light mode
+                else:
+                    title_bg_color = QColor(90, 50, 70) # #344b29
+            else:
+                # Output Unified Sink -> Purple #5a3246
+                if is_light_mode:
+                    title_bg_color = QColor(180, 210, 160) # Light purple for light mode
+                else:
+                    title_bg_color = QColor(41, 57, 38) # #5a3246
+        elif is_unified or self.is_input_unified or self.is_output_unified:
+            # Regular unified nodes -> Blue #324664
+            if is_light_mode:
+                title_bg_color = QColor(200, 220, 255) # Light blue for light mode
+            else:
+                title_bg_color = QColor(50, 70, 100) # #324664
+        else:
+            if is_light_mode:
+                title_bg_color = QColor(220, 220, 220)
+            else:
+                title_bg_color = option.palette.color(QPalette.ColorRole.Button)
+
         if is_light_mode:
             node_body_bg_color = QColor(240, 240, 240)
-            title_bg_color = QColor(220, 220, 220)
             final_separator_color = QColor(192, 192, 192)
         else:
             node_body_bg_color = original_node_body_bg
-            title_bg_color = option.palette.color(QPalette.ColorRole.Button)
             final_separator_color = option.palette.color(QPalette.ColorRole.Mid)
         
         return node_body_bg_color, title_bg_color, final_separator_color, border_color
@@ -234,6 +369,24 @@ class NodeItem(QGraphicsItem):
 
             port_item = PortItem(self, port_name, port_obj, is_input_flag)
             port_map[port_name] = port_item
+
+            # Automatically connect new input/output ports to unified sink if node is unified
+            # Automatically connect new input/output ports to unified sink if node is unified
+            if is_input_flag and self.is_input_unified and self.unified_input_sink_name:
+                 if not self.unified_input_module_id:
+                     # Sink was unloaded (e.g. because ports were empty), recreate it
+                     self._create_unified_sink(is_input=True)
+                     self._wait_for_sink_and_connect(is_input=True)
+                 elif self.scene() and hasattr(self.scene(), 'jack_connection_handler'):
+                    self._connect_new_port_to_unified_sink(port_item, is_input=True)
+            elif not is_input_flag and self.is_output_unified and self.unified_output_sink_name:
+                 if not self.unified_output_module_id:
+                     # Sink was unloaded, recreate it
+                     self._create_unified_sink(is_input=False)
+                     self._wait_for_sink_and_connect(is_input=False)
+                 elif self.scene() and hasattr(self.scene(), 'jack_connection_handler'):
+                    self._connect_new_port_to_unified_sink(port_item, is_input=False)
+
             # Only try to lay out ports if we're already in a scene
             if self.scene():
                 self.layout_ports() # Recalculate layout
@@ -267,14 +420,29 @@ class NodeItem(QGraphicsItem):
                  self.scene().removeItem(port_item)
 
             # Check if this was the last port of its type and remove BulkAreaItem
-            if port_item.is_input and not self.input_ports and self.input_area_item:
-                if self.scene():
-                    self.scene().removeItem(self.input_area_item)
-                self.input_area_item = None
-            elif not port_item.is_input and not self.output_ports and self.output_area_item:
-                 if self.scene():
-                    self.scene().removeItem(self.output_area_item)
-                 self.output_area_item = None
+            if port_item.is_input and not self.input_ports:
+                if self.input_area_item:
+                    if self.scene():
+                        self.scene().removeItem(self.input_area_item)
+                    self.input_area_item = None
+                
+                # If input unification is active but no input ports remain, temporarily unload the sink
+                if self.is_input_unified:
+                    print(f"No input ports remaining for {self.client_name}, temporarily unloading unified input sink.")
+                    self._unload_unified_sink(is_input=True)
+                    # Note: We do NOT set is_input_unified to False, so it persists and will auto-recreate
+
+            elif not port_item.is_input and not self.output_ports:
+                if self.output_area_item:
+                     if self.scene():
+                        self.scene().removeItem(self.output_area_item)
+                     self.output_area_item = None
+
+                # If output unification is active but no output ports remain, temporarily unload the sink
+                if self.is_output_unified:
+                    print(f"No output ports remaining for {self.client_name}, temporarily unloading unified output sink.")
+                    self._unload_unified_sink(is_input=False)
+                    # Note: We do NOT set is_output_unified to False, so it persists and will auto-recreate
 
             # Only try to lay out ports if we're in a scene
             if self.scene():
@@ -391,7 +559,7 @@ class NodeItem(QGraphicsItem):
 
     def _disconnect_all_connections(self):
         """Disconnects all ports of the client this NodeItem (or its origin) represents."""
-        client_to_disconnect = self.original_client_name if self.is_split_part and self.original_client_name else self.client_name
+        client_to_disconnect = self.original_client_name
         current_scene = self.scene()
         if current_scene and hasattr(current_scene, 'jack_connection_handler'):
             try:
@@ -585,9 +753,9 @@ class NodeItem(QGraphicsItem):
         
         # Add message
         if custom_message:
-            message = f"{custom_message}\n\nYou can restore it later from the Node Visibility dialog."
+            message = f"{custom_message}\n\nYou can restore it later from the Clients Visibility dialog."
         else:
-            message = f"Hide {client_name} {message_type} node?\n\nYou can restore it later from the Node Visibility dialog."
+            message = f"Hide {client_name} {message_type} node?\n\nYou can restore it later from the Clients Visibility dialog."
         
         label = QLabel(message)
         layout.addWidget(label)
@@ -669,26 +837,659 @@ class NodeItem(QGraphicsItem):
         hide_action.setShortcut(Qt.Key.Key_H)
         hide_action.triggered.connect(self._hide_node)
 
+    def ensure_unified_sink_exists(self):
+        """Check if the unified sinks exist and recreate them if not or if broken."""
+        # Check input unified sink
+        if self.is_input_unified and self.unified_input_sink_name:
+            self._ensure_specific_sink_exists(is_input=True)
+
+        # Check output unified sink
+        if self.is_output_unified and self.unified_output_sink_name:
+            self._ensure_specific_sink_exists(is_input=False)
+
+    def _ensure_specific_sink_exists(self, is_input: bool):
+        """Helper to ensure a specific unified sink exists."""
+        sink_name = self.unified_input_sink_name if is_input else self.unified_output_sink_name
+        if not sink_name:
+            return
+
+        # Check if we have ports to unify
+        has_ports = bool(self.input_ports) if is_input else bool(self.output_ports)
+
+        jack_handler = self.jack_handler if self.jack_handler else getattr(self.scene(), 'jack_connection_handler', None)
+        if not jack_handler:
+            return
+
+        all_ports = jack_handler.get_ports()
+        sink_client_name = f"{sink_name} Audio/Sink sink"
+        sink_ports = [p for p in all_ports if p.name.startswith(sink_client_name)]
+
+        if not has_ports:
+            if sink_ports:
+                print(f"Unified {'input' if is_input else 'output'} sink {sink_name} exists but node has no ports. Unloading...")
+                self._unload_unified_sink(is_input=is_input)
+            return
+
+        if not sink_ports:
+            # Sink doesn't exist, recreate it
+            print(f"Unified {'input' if is_input else 'output'} sink {sink_name} not found, recreating...")
+            self._create_unified_sink(is_input=is_input)
+            self._wait_for_sink_and_connect(is_input=is_input)
+        else:
+            print(f"Unified {'input' if is_input else 'output'} sink {sink_name} found, testing connections...")
+            # Test if the sink is functional by trying to make a test connection
+            if self._test_sink_functionality(is_input=is_input):
+                print(f"Unified {'input' if is_input else 'output'} sink {sink_name} is functional, ensuring connections...")
+                self._connect_to_unified_sink(is_input=is_input)
+            else:
+                print(f"Unified {'input' if is_input else 'output'} sink {sink_name} is broken, recreating...")
+                # First unload the broken sink if we can find the module ID
+                module_id = self.unified_input_module_id if is_input else self.unified_output_module_id
+                if module_id:
+                    try:
+                        import subprocess
+                        subprocess.run(["pactl", "unload-module", str(module_id)],
+                                     check=True, capture_output=True, text=True)
+                    except Exception as e:
+                        print(f"Warning: Could not unload broken unified sink: {e}")
+
+                # Clear the old module ID so we get a fresh one
+                if is_input:
+                    self.unified_input_module_id = None
+                else:
+                    self.unified_output_module_id = None
+
+                # Recreate the sink
+                self._create_unified_sink(is_input=is_input)
+                self._wait_for_sink_and_connect(is_input=is_input)
+
+    def _test_sink_functionality(self, is_input: bool):
+        """Test if the unified sink is functional by checking if connection logic works."""
+        sink_name = self.unified_input_sink_name if is_input else self.unified_output_sink_name
+        if not sink_name or not self.scene() or not hasattr(self.scene(), 'jack_connection_handler'):
+            return False
+
+        try:
+            # Try to find the sink ports
+            jack_handler = self.jack_handler
+            all_ports = jack_handler.get_ports()
+            sink_client_name = f"{sink_name} Audio/Sink sink"
+
+            if not is_input: # Output unification (node outputs -> sink inputs)
+                # For output unification, we need sink inputs
+                sink_inputs = [p for p in all_ports if
+                              p.is_input and
+                              p.name.startswith(sink_client_name + ':') and
+                              (p.name.endswith(':playback_FL') or p.name.endswith(':playback_FR') or
+                               p.name.endswith(':playback_1') or p.name.endswith(':playback_2'))]
+                return len(sink_inputs) >= 2  # Should have at least left and right channels
+
+            else: # Input unification (sink outputs -> node inputs)
+                # For input unification, we need sink outputs
+                sink_outputs = [p for p in all_ports if
+                               p.is_output and
+                               p.name.startswith(sink_client_name + ':') and
+                               (p.name.endswith(':monitor_FL') or p.name.endswith(':monitor_FR') or
+                                p.name.endswith(':monitor_1') or p.name.endswith(':monitor_2'))]
+                return len(sink_outputs) >= 2  # Should have at least left and right channels
+
+        except Exception as e:
+            print(f"Error testing sink functionality for {sink_name}: {e}")
+            return False
+
+    def unify_from_preset(self, unify_data):
+        """Applies the unified state to the node from a preset."""
+        # Handle legacy single unified state
+        if unify_data.get('is_unified'):
+            self.is_unified = True # Legacy
+            # Try to infer type or map to new structure if possible, 
+            # but apply_configuration handles the main logic.
+            pass
+
+        # Handle new split states
+        if unify_data.get('is_input_unified'):
+            self.is_input_unified = True
+            self.unified_input_sink_name = unify_data.get('unified_input_sink_name')
+        
+        if unify_data.get('is_output_unified'):
+            self.is_output_unified = True
+            self.unified_output_sink_name = unify_data.get('unified_output_sink_name')
+
+        # Skip sink creation here, ensure_unified_sink_exists will handle it
+        self.update()
+
+    def _create_unified_sink(self, is_input: bool):
+        """Execute the pactl command to create the unified virtual sink."""
+        import subprocess
+        import json
+
+        sink_name = self.unified_input_sink_name if is_input else self.unified_output_sink_name
+        if not sink_name:
+            return
+
+        command = ["pactl", "load-module", "module-null-sink", f"sink_name={sink_name}", "channel_map=stereo"]
+
+        try:
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
+            module_id = result.stdout.strip()
+
+            if is_input:
+                self.unified_input_module_id = module_id
+            else:
+                self.unified_output_module_id = module_id
+
+            # Save the module ID to config
+            self._save_unified_module_id(sink_name, module_id)
+
+            print(f"Created unified {'input' if is_input else 'output'} virtual sink: {sink_name}")
+            print(f"Module ID: {module_id}")
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating unified virtual sink: {e}")
+
+    def _save_unified_module_id(self, sink_name: str, module_id: str):
+        """Save the unified module ID to config file for later unloading."""
+        import json
+        try:
+            from cable_core.config import ConfigManager
+            config_manager = ConfigManager()
+
+            # Get existing module IDs, or initialize empty dict
+            module_ids_json = config_manager.get_str_setting('unified_virtual_sinks', '{}')
+            try:
+                module_ids = json.loads(module_ids_json) if module_ids_json else {}
+            except json.JSONDecodeError:
+                module_ids = {}
+
+            # Add/update the module ID
+            module_ids[sink_name] = module_id
+
+            # Save back to config
+            config_manager.set_str_setting('unified_virtual_sinks', json.dumps(module_ids))
+
+        except Exception as e:
+            print(f"Error saving unified module ID for {sink_name}: {e}")
+
+    def _unload_unified_sink(self, is_input: bool):
+        """Unload the unified virtual sink."""
+        import subprocess
+        import json
+
+        module_id = self.unified_input_module_id if is_input else self.unified_output_module_id
+        sink_name = self.unified_input_sink_name if is_input else self.unified_output_sink_name
+
+        if not module_id:
+            return
+
+        command = ["pactl", "unload-module", module_id]
+
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            print(f"Unloaded unified {'input' if is_input else 'output'} virtual sink: {sink_name}")
+
+            # Remove the module ID from config
+            self._remove_unified_module_id(sink_name)
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error unloading unified virtual sink: {e}")
+
+    def _remove_unified_module_id(self, sink_name: str):
+        """Remove the unified module ID from config file."""
+        try:
+            import json
+            from cable_core.config import ConfigManager
+            config_manager = ConfigManager()
+
+            module_ids_json = config_manager.get_str_setting('unified_virtual_sinks', '{}')
+            try:
+                module_ids = json.loads(module_ids_json) if module_ids_json else {}
+            except json.JSONDecodeError:
+                module_ids = {}
+
+            if sink_name in module_ids:
+                del module_ids[sink_name]
+
+            config_manager.set_str_setting('unified_virtual_sinks', json.dumps(module_ids))
+
+        except Exception as e:
+            print(f"Error removing unified module ID for {sink_name}: {e}")
+
+    def _connect_to_unified_sink(self, is_input: bool):
+        """Connect this node's ports to the unified sink based on the direction."""
+        sink_name = self.unified_input_sink_name if is_input else self.unified_output_sink_name
+        
+        if not sink_name or not self.scene() or not hasattr(self.scene(), 'jack_connection_handler'):
+            return
+
+        jack_handler = self.jack_handler
+        all_ports = jack_handler.get_ports()
+        connection_handler = self.scene().jack_connection_handler
+
+        # Use the is_input flag to determine which ports to connect
+        if not is_input: # Output unification (node outputs -> sink inputs)
+            # Connect output ports to sink inputs
+            node_outputs = sorted([p for p in self.output_ports.values()], key=natural_sort_key)
+
+            # Find sink input ports that belong to our specific unified sink
+            sink_client_name = f"{sink_name} Audio/Sink sink"
+            sink_inputs = [p for p in all_ports if
+                          p.is_input and
+                          p.name.startswith(sink_client_name + ':') and
+                          (p.name.endswith(':playback_FL') or p.name.endswith(':playback_FR') or 
+                           p.name.endswith(':playback_1') or p.name.endswith(':playback_2'))]
+
+            print(f"Connecting output node to sink '{sink_name}':")
+            print(f"  Node outputs: {[p.port_name for p in node_outputs]}")
+            print(f"  Sink inputs found: {[p.name for p in sink_inputs]}")
+
+            if not node_outputs or not sink_inputs:
+                print("Unified sink connection failed: No node outputs or sink inputs found.")
+                # Debug: print all ports for this sink to see what's wrong
+                all_sink_ports = [p.name for p in all_ports if p.name.startswith(sink_client_name + ':')]
+                print(f"  All ports for {sink_client_name}: {all_sink_ports}")
+                return
+
+            # Match and connect outputs to inputs
+            for i, port_item in enumerate(node_outputs):
+                port_name = port_item.short_name.lower()
+                target_sink_input = None
+
+                if 'left' in port_name or 'fl' in port_name:
+                    target_sink_input = sink_inputs[0].name if len(sink_inputs) > 0 else None
+                elif 'right' in port_name or 'fr' in port_name:
+                    target_sink_input = sink_inputs[1].name if len(sink_inputs) > 1 else sink_inputs[0].name if len(sink_inputs) > 0 else None
+                else:
+                    target_sink_input = sink_inputs[i % len(sink_inputs)].name if sink_inputs else None
+
+                if target_sink_input:
+                    try:
+                        connection_handler.make_connection(port_item.port_name, target_sink_input)
+                        print(f"  Connected {port_item.port_name} -> {target_sink_input}")
+                    except Exception as e:
+                        print(f"Error connecting {port_item.port_name} to {target_sink_input}: {e}")
+
+        else: # Input unification (sink outputs -> node inputs)
+            # Connect sink outputs to input ports
+            node_inputs = sorted([p for p in self.input_ports.values()], key=natural_sort_key)
+
+            # Find sink output ports that belong to our specific unified sink
+            sink_client_name = f"{sink_name} Audio/Sink sink"
+            sink_outputs = [p for p in all_ports if
+                           p.is_output and
+                           p.name.startswith(sink_client_name + ':') and
+                           (p.name.endswith(':monitor_FL') or p.name.endswith(':monitor_FR') or
+                            p.name.endswith(':monitor_1') or p.name.endswith(':monitor_2'))]
+
+            print(f"Connecting input node to sink '{sink_name}':")
+            print(f"  Node inputs: {[p.port_name for p in node_inputs]}")
+            print(f"  Sink outputs found: {[p.name for p in sink_outputs]}")
+
+            if not node_inputs or not sink_outputs:
+                print("Unified sink connection failed: No node inputs or sink outputs found.")
+                # Debug: print all ports for this sink
+                all_sink_ports = [p.name for p in all_ports if p.name.startswith(sink_client_name + ':')]
+                print(f"  All ports for {sink_client_name}: {all_sink_ports}")
+                return
+
+            # Match and connect sink outputs to node inputs
+            for i, port_item in enumerate(node_inputs):
+                port_name = port_item.short_name.lower()
+                source_sink_output = None
+
+                if 'left' in port_name or 'fl' in port_name:
+                    source_sink_output = sink_outputs[0].name if len(sink_outputs) > 0 else None
+                elif 'right' in port_name or 'fr' in port_name:
+                    source_sink_output = sink_outputs[1].name if len(sink_outputs) > 1 else sink_outputs[0].name if len(sink_outputs) > 0 else None
+                else:
+                    source_sink_output = sink_outputs[i % len(sink_outputs)].name if sink_outputs else None
+
+                if source_sink_output:
+                    try:
+                        connection_handler.make_connection(source_sink_output, port_item.port_name)
+                        print(f"  Connected {source_sink_output} -> {port_item.port_name}")
+                    except Exception as e:
+                        print(f"Error connecting {source_sink_output} to {port_item.port_name}: {e}")
+
+
+    def _connect_new_port_to_unified_sink(self, port_item: PortItem, is_input: bool):
+        """Connect a newly added port to the unified sink using channel matching."""
+        sink_name_base = self.unified_input_sink_name if is_input else self.unified_output_sink_name
+        if not sink_name_base or not self.scene() or not hasattr(self.scene(), 'jack_connection_handler'):
+            return
+
+        jack_handler = self.jack_handler
+        all_ports = jack_handler.get_ports()
+
+        sink_name_full = f"{sink_name_base} Audio/Sink sink"
+        
+        # If is_input=True (input port added), we need to connect sink OUTPUT (monitor) -> port
+        # If is_input=False (output port added), we need to connect port -> sink INPUT (playback)
+        
+        if is_input:
+            # Find sink outputs (monitors)
+            sink_ports = sorted([p for p in all_ports if (p.name.startswith(sink_name_base + ':') or p.name.startswith(sink_name_full + ':')) and p.is_output], key=lambda p: p.name)
+        else:
+            # Find sink inputs (playback)
+            sink_ports = sorted([p for p in all_ports if (p.name.startswith(sink_name_base + ':') or p.name.startswith(sink_name_full + ':')) and p.is_input], key=lambda p: p.name)
+
+        if not sink_ports:
+            print(f"Unified sink ports not found for {port_item.port_name}")
+            return
+
+        # Identify left and right sink ports
+        left_sink_port = None
+        right_sink_port = None
+        if len(sink_ports) >= 2:
+            left_sink_port = sink_ports[0].name
+            right_sink_port = sink_ports[1].name
+        elif len(sink_ports) == 1:
+            left_sink_port = sink_ports[0].name
+            right_sink_port = sink_ports[0].name # Fallback to mono
+
+        if not left_sink_port or not right_sink_port:
+            return
+
+        # Match port to sink port based on channel name
+        port_name_lower = port_item.short_name.lower()
+        target_sink_port = None
+
+        if 'left' in port_name_lower or 'fl' in port_name_lower or 'l' == port_name_lower:
+            target_sink_port = left_sink_port
+        elif 'right' in port_name_lower or 'fr' in port_name_lower or 'r' == port_name_lower:
+            target_sink_port = right_sink_port
+        else:
+            # Try to match by position
+            if is_input:
+                node_ports = sorted([p for p in self.input_ports.values()], key=natural_sort_key)
+            else:
+                node_ports = sorted([p for p in self.output_ports.values()], key=natural_sort_key)
+                
+            port_index = node_ports.index(port_item) if port_item in node_ports else 0
+            target_sink_port = left_sink_port if port_index % 2 == 0 else right_sink_port
+
+        if target_sink_port:
+            try:
+                connection_handler = self.scene().jack_connection_handler
+                if is_input:
+                    # Connect sink output -> input port
+                    connection_handler.make_connection(target_sink_port, port_item.port_name)
+                else:
+                    # Connect output port -> sink input
+                    connection_handler.make_connection(port_item.port_name, target_sink_port)
+                print(f"Auto-connected new port {port_item.port_name} to unified sink")
+            except Exception as e:
+                print(f"Error auto-connecting {port_item.port_name} to {target_sink_port}: {e}")
+
+    def _wait_for_sink_and_connect(self, is_input: bool):
+        """Waits for the unified sink to appear and then connects to it."""
+        MAX_RETRIES = 50 # 50 * 100ms = 5 seconds
+        if self.wait_for_sink_retries >= MAX_RETRIES:
+            print("Unified sink did not appear in time.")
+            self.wait_for_sink_retries = 0
+            return
+
+        sink_name_base = self.unified_input_sink_name if is_input else self.unified_output_sink_name
+        if not sink_name_base:
+            print("No unified sink name available for connection attempt.")
+            self.wait_for_sink_retries = 0
+            return
+
+        jack_handler = self.jack_handler
+        all_ports = jack_handler.get_ports()
+
+        # Look specifically for ports that belong to the sink we created for this node
+        # The full JACK client name will be: "sink_name_base Audio/Sink sink"
+        sink_client_name = f"{sink_name_base} Audio/Sink sink"
+        
+        # We check for ANY ports from this sink to confirm its existence
+        sink_ports = sorted([p for p in all_ports if (
+            p.name.startswith(sink_client_name + ':')
+        )], key=lambda p: p.name)
+
+        print(f"Waiting for sink - name_base: '{sink_name_base}', found {len(sink_ports)} sink ports")
+        if sink_ports:
+            for port in sink_ports[:5]:  # Show first 5
+                print(f"  Found sink port: {port.name}")
+
+        if sink_ports:
+            self.wait_for_sink_retries = 0
+            self._connect_to_unified_sink(is_input=is_input)
+        else:
+            self.wait_for_sink_retries += 1
+            self.wait_for_sink_timer = QTimer()
+            self.wait_for_sink_timer.setSingleShot(True)
+            self.wait_for_sink_timer.timeout.connect(lambda: self._wait_for_sink_and_connect(is_input))
+            self.wait_for_sink_timer.start(100)
+
+    def _toggle_unify_input(self, checked):
+        """Toggle unification for input ports."""
+        try:
+            if checked:
+                if not self.input_ports:
+                    print("Node has no input ports, cannot unify inputs")
+                    if self.unify_input_action: self.unify_input_action.setChecked(False)
+                    return
+
+                self.is_input_unified = True
+                self.unified_input_sink_name = f"unified-input-{self.client_name.replace(' ', '_')}"
+                self._create_unified_sink(is_input=True)
+                self._wait_for_sink_and_connect(is_input=True)
+            else:
+                self.is_input_unified = False
+                sink_name_to_remove = self.unified_input_sink_name
+                module_id_to_remove = self.unified_input_module_id
+                
+                self._unload_unified_sink(is_input=True)
+                self.unified_input_sink_name = None
+                self.unified_input_module_id = None
+
+            self.update()
+            self._update_config_unified_state()
+
+        except Exception as e:
+            print(f"Error toggling input unification: {e}")
+            traceback.print_exc()
+
+    def _toggle_unify_output(self, checked):
+        """Toggle unification for output ports."""
+        try:
+            if checked:
+                if not self.output_ports:
+                    print("Node has no output ports, cannot unify outputs")
+                    if self.unify_output_action: self.unify_output_action.setChecked(False)
+                    return
+
+                self.is_output_unified = True
+                self.unified_output_sink_name = f"unified-output-{self.client_name.replace(' ', '_')}"
+                self._create_unified_sink(is_input=False)
+                self._wait_for_sink_and_connect(is_input=False)
+            else:
+                self.is_output_unified = False
+                sink_name_to_remove = self.unified_output_sink_name
+                module_id_to_remove = self.unified_output_module_id
+                
+                self._unload_unified_sink(is_input=False)
+                self.unified_output_sink_name = None
+                self.unified_output_module_id = None
+
+            self.update()
+            self._update_config_unified_state()
+
+        except Exception as e:
+            print(f"Error toggling output unification: {e}")
+            traceback.print_exc()
+
+    def _update_config_unified_state(self):
+        """Updates the unified state in the saved configuration."""
+        if hasattr(self, 'config_manager') and self.config_manager:
+            try:
+                import json
+                if self.config_manager.node_positions_file.exists():
+                    with open(self.config_manager.node_positions_file, 'r') as f:
+                        saved_data = json.load(f)
+
+                    client_config = saved_data.get(self.client_name, {})
+
+                    # Update input unified state
+                    if self.is_input_unified:
+                        client_config[self.config_manager.IS_INPUT_UNIFIED_KEY] = True
+                        client_config[self.config_manager.UNIFIED_INPUT_SINK_NAME_KEY] = self.unified_input_sink_name
+                        client_config[self.config_manager.UNIFIED_INPUT_MODULE_ID_KEY] = self.unified_input_module_id
+                    else:
+                        client_config.pop(self.config_manager.IS_INPUT_UNIFIED_KEY, None)
+                        client_config.pop(self.config_manager.UNIFIED_INPUT_SINK_NAME_KEY, None)
+                        client_config.pop(self.config_manager.UNIFIED_INPUT_MODULE_ID_KEY, None)
+
+                    # Update output unified state
+                    if self.is_output_unified:
+                        client_config[self.config_manager.IS_OUTPUT_UNIFIED_KEY] = True
+                        client_config[self.config_manager.UNIFIED_OUTPUT_SINK_NAME_KEY] = self.unified_output_sink_name
+                        client_config[self.config_manager.UNIFIED_OUTPUT_MODULE_ID_KEY] = self.unified_output_module_id
+                    else:
+                        client_config.pop(self.config_manager.IS_OUTPUT_UNIFIED_KEY, None)
+                        client_config.pop(self.config_manager.UNIFIED_OUTPUT_SINK_NAME_KEY, None)
+                        client_config.pop(self.config_manager.UNIFIED_OUTPUT_MODULE_ID_KEY, None)
+                    
+                    # Clean up legacy keys if fully migrated
+                    if not self.is_unified:
+                         client_config.pop(self.config_manager.IS_UNIFIED_KEY, None)
+                         client_config.pop(self.config_manager.UNIFIED_SINK_NAME_KEY, None)
+                         client_config.pop(self.config_manager.UNIFIED_MODULE_ID_KEY, None)
+                         client_config.pop(self.config_manager.UNIFIED_PORTS_TYPE_KEY, None)
+
+                    # Save updated config
+                    saved_data[self.client_name] = client_config
+                    with open(self.config_manager.node_positions_file, 'w') as f:
+                        json.dump(saved_data, f, indent=4)
+
+            except Exception as e:
+                print(f"Error updating unified state in config: {e}")
+
+    def _show_unify_ports_choice_dialog(self):
+        """
+        Show a dialog to choose whether to unify input ports or output ports.
+
+        Returns:
+            str or None: 'input', 'output', or None if canceled
+        """
+        # Get the main window as parent for proper centering
+        parent = None
+        if self.scene() and self.scene().views():
+            parent = self.scene().views()[0]
+
+        dialog = QDialog(parent)
+        dialog.setWindowTitle("Choose Ports to Unify")
+        dialog.setModal(True)
+
+        layout = QVBoxLayout(dialog)
+
+        # Add instruction text
+        instruction = QLabel("Unify:")
+        instruction.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(instruction)
+
+        # Create radio buttons
+        output_radio = QRadioButton("Output ports")
+        output_radio.setChecked(True)  # Default selection
+        layout.addWidget(output_radio)
+
+        input_radio = QRadioButton("Input ports")
+        layout.addWidget(input_radio)
+
+        # Add buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        # Center the dialog in the main window
+        if parent:
+            dialog.adjustSize()  # Ensure the dialog size is calculated
+            parent_center = parent.rect().center()
+            dialog_center = dialog.rect().center()
+            dialog.move(parent.mapToGlobal(parent_center - dialog_center))
+
+        # Execute dialog
+        result = dialog.exec()
+
+        if result == QDialog.DialogCode.Accepted:
+            if input_radio.isChecked():
+                return 'input'
+            elif output_radio.isChecked():
+                return 'output'
+            else:
+                return None
+        else:
+            return None
+
     def _build_context_menu_for_normal_node(self, menu: QMenu, disconnect_is_enabled: bool):
         disconnect_action = menu.addAction("Disconnect all")
         disconnect_action.setEnabled(disconnect_is_enabled)
         disconnect_action.triggered.connect(self._disconnect_all_connections)
-        
+
         # Add separator after Disconnect
         menu.addSeparator()
-        
+
+        # Add "Unload sink" option for virtual sinks
+        if hasattr(self, 'is_virtual_sink') and self.is_virtual_sink:
+            unload_action = menu.addAction("Unload sink/source")
+            unload_action.triggered.connect(self._unload_sink)
+
         split_action = menu.addAction("Split")
         split_action.setShortcut(Qt.Key.Key_S)
         split_action.setEnabled(bool(self.input_ports) and bool(self.output_ports))
         split_action.triggered.connect(lambda: self.split_handler.split_node(save_state=True))
-        
+
         fold_text = "Unfold" if self.is_folded else "Fold"
         menu.addAction(fold_text).triggered.connect(self.fold_handler.toggle_main_fold_state)
-        
+
         # Add the Hide option
         hide_action = menu.addAction("Hide")
         hide_action.setShortcut(Qt.Key.Key_H)
         hide_action.triggered.connect(self._hide_node)
+
+        # Check if this is a MIDI node - Unify toggle should not be available for MIDI nodes
+        # Also hide unify option for all sinks (virtual sinks created by the app or externally)
+        is_midi_node = False
+        for port_list in [self.input_ports, self.output_ports]:
+            for port_item in port_list.values():
+                if hasattr(port_item.port_obj, 'is_midi') and port_item.port_obj.is_midi:
+                    is_midi_node = True
+                    break
+            if is_midi_node:
+                break
+
+        # Check if this is a virtual sink (any virtual sink)
+        is_virtual_sink = getattr(self, 'is_virtual_sink', False)
+
+        # Add second separator and "Unify" checkbox only for audio nodes that aren't virtual sinks
+        if not is_midi_node and not is_virtual_sink:
+            # Add separator before Unify section
+            menu.addSeparator()
+
+            # Add separate toggles for Input and Output unification
+            
+            # Unify Input Ports
+            if bool(self.input_ports):
+                self.unify_input_action = QAction("Unify input ports", menu)
+                self.unify_input_action.setCheckable(True)
+                self.unify_input_action.setChecked(self.is_input_unified)
+                self.unify_input_action.toggled.connect(self._toggle_unify_input)
+                menu.addAction(self.unify_input_action)
+
+            # Unify Output Ports
+            if bool(self.output_ports):
+                self.unify_output_action = QAction("Unify output ports", menu)
+                self.unify_output_action.setCheckable(True)
+                self.unify_output_action.setChecked(self.is_output_unified)
+                self.unify_output_action.toggled.connect(self._toggle_unify_output)
+                menu.addAction(self.unify_output_action)
+
+            # Add help text
+            help_text = QAction("Route client ports through\ndedicated stereo virtual sinks", menu)
+            help_text.setEnabled(False)
+            menu.addAction(help_text)
 
     def contextMenuEvent(self, event):
         if not (event.pos().y() <= self._calculated_title_height):
@@ -750,6 +1551,7 @@ class NodeItem(QGraphicsItem):
 
     def apply_configuration(self, config: dict):
         """Applies visual state (split, position, fold states) from a configuration dictionary."""
+        self._internal_state_change_in_progress = True
         # Store the config on the node for reference
         self.config = config.copy()  # Make a copy to avoid reference issues
         
@@ -774,6 +1576,13 @@ class NodeItem(QGraphicsItem):
         # If it IS a split origin, its layout is minimal (title bar only) and handled by split_handler.
         # Its parts (if they exist) will have their layout_ports called by their own apply_fold_config if needed.
         self.update() # Ensure repaint
+
+        # Apply unified state
+        if config.get('is_input_unified') or self.is_input_unified or config.get('is_output_unified') or self.is_output_unified or config.get('is_unified'):
+            self.unify_from_preset(config)
+            self.ensure_unified_sink_exists()
+        
+        self._internal_state_change_in_progress = False
 
     def itemChange(self, change, value):
         if not self.scene() or not hasattr(self, 'config_manager') or not self.config_manager:
@@ -812,7 +1621,7 @@ class NodeItem(QGraphicsItem):
 
         all_ports_in_jack = self.jack_handler.get_ports()
         # Determine the correct JACK client name to match against
-        jack_client_name_to_match = self.original_client_name if self.is_split_part and self.original_client_name else self.client_name
+        jack_client_name_to_match = self.original_client_name
         
         current_ports_in_jack = [p for p in all_ports_in_jack if p.name.startswith(jack_client_name_to_match + ':')]
         current_port_names_in_jack = {p.name for p in current_ports_in_jack}
@@ -874,3 +1683,166 @@ class NodeItem(QGraphicsItem):
                         jack_handler.break_connection(conn_item.source_port.port_name, conn_item.dest_port.port_name)
                     except Exception as e:
                         print(f"Error breaking output connection for {port_item.port_name} of {self.client_name}: {e}")
+
+    def _check_if_virtual_sink(self, client_name: str):
+        """Check if this node represents a virtual sink by looking at stored module IDs or detecting pattern."""
+        try:
+            from cable_core.config import ConfigManager
+            config_manager = ConfigManager()
+            module_ids_json = config_manager.get_str_setting('virtual_sink_module_ids', '{}')
+
+            if module_ids_json:
+                import json
+                module_ids = json.loads(module_ids_json)
+                # Check exact match first (full client name in config)
+                if client_name in module_ids:
+                    self.is_virtual_sink = True
+                    self.module_id = module_ids[client_name]
+                else:
+                    # Check if client name starts with any sink name (app-created sinks)
+                    self.is_virtual_sink = False
+                    for sink_name in module_ids.keys():
+                        if client_name.startswith(sink_name + ' '):
+                            self.is_virtual_sink = True
+                            self.module_id = module_ids[sink_name]
+                            break
+
+                    # Fallback: Check for any virtual sink pattern (external sinks)
+                    if not self.is_virtual_sink and client_name.endswith(' Audio/Sink sink'):
+                        self.is_virtual_sink = True
+                        self.module_id = None  # Will find dynamically
+                        self.external_sink = True
+            else:
+                # No config entries, but still check for virtual sink pattern
+                if client_name.endswith(' Audio/Sink sink'):
+                    self.is_virtual_sink = True
+                    self.module_id = None
+                    self.external_sink = True
+
+            # Check if this virtual sink was created by Unify toggle
+            if self.is_virtual_sink:
+                unified_sinks_json = config_manager.get_str_setting('unified_virtual_sinks', '{}')
+                if unified_sinks_json:
+                    unified_sinks = json.loads(unified_sinks_json)
+                    # Check if this sink is a unified sink
+                    for unified_sink_name in unified_sinks.keys():
+                        if (client_name == unified_sink_name or  # Direct match
+                            client_name == f"{unified_sink_name} Audio/Sink sink"):  # Full JACK name match
+                            self.is_unified_sink = True
+                            print(f"Detected unified sink: {client_name} matches {unified_sink_name}")
+                            break
+                                    # Check pattern by normalizing both names to use underscores for comparison
+                        sink_base_from_client = client_name.replace(' Audio/Sink sink', '').replace(' ', '_').replace('-', '_')
+                        unified_sink_name_normalized = unified_sink_name.replace(' ', '_').replace('-', '_')
+                        if unified_sink_name_normalized.startswith(sink_base_from_client + '_'):
+                            self.is_unified_sink = True
+                            print(f"Detected unified sink (pattern match): {client_name} matches {unified_sink_name}")
+                            break
+
+        except Exception as e:
+            print(f"Error checking if node is virtual sink for {client_name}: {e}")
+            self.is_virtual_sink = False
+            self.module_id = None
+
+    def _find_module_id_for_external_sink(self, sink_name: str):
+        """Find module ID for an external virtual sink using pactl list sinks."""
+        try:
+            import subprocess
+            result = subprocess.run(["pactl", "list", "sinks"],
+                                  capture_output=True, text=True, check=True)
+
+            lines = result.stdout.split('\n')
+            in_target_sink = False
+
+            for line in lines:
+                line = line.strip()
+
+                # Start of target sink - be more precise with matching
+                if not in_target_sink and line == f'Name: {sink_name}':
+                    in_target_sink = True
+
+                # Found Owner Module within target sink
+                elif in_target_sink and 'Owner Module:' in line:
+                    module_id = line.split(':', 1)[1].strip()
+                    # Validate it's a real module ID (not error value)
+                    if module_id.isdigit():
+                        module_id_int = int(module_id)
+                        if module_id_int != 4294967295:
+                            return module_id
+                        else:
+                            print(f"Warning: Invalid module ID {module_id} for sink '{sink_name}' (error value)")
+                            return None
+                    else:
+                        print(f"Warning: Non-numeric module ID '{module_id}' for sink '{sink_name}'")
+                        return None
+
+                # Exit sink block when we hit the next sink
+                elif in_target_sink and line.startswith('Name: ') and line != f'Name: {sink_name}':
+                    break
+
+            print(f"Warning: Could not find valid Owner Module for sink '{sink_name}'")
+            return None
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error running pactl list sinks: {e}")
+            return None
+        except Exception as e:
+            print(f"Error finding module ID for external sink '{sink_name}': {e}")
+            return None
+
+    def _unload_sink(self):
+        """Unload this virtual sink using the stored module ID or finding it dynamically."""
+        if not self.is_virtual_sink:
+            print(f"Cannot unload sink: {self.client_name} is not identified as a virtual sink")
+            return
+
+        # Extract sink name from client name (remove " Audio/Sink sink" suffix)
+        sink_name = self.client_name.replace(' Audio/Sink sink', '')
+
+        # Get module ID - either stored or find dynamically
+        module_id = getattr(self, 'module_id', None)
+        if not module_id:
+            module_id = self._find_module_id_for_external_sink(sink_name)
+
+        if not module_id:
+            print(f"Cannot unload sink: No module ID found for {self.client_name}")
+            return
+
+        import subprocess
+        command = ["pactl", "unload-module", str(module_id)]
+
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            sink_type = "external" if getattr(self, 'external_sink', False) else "tracked"
+            print(f"Successfully unloaded {sink_type} virtual sink: {self.client_name} (module ID: {module_id})")
+
+            # For tracked sinks: Remove from stored module IDs
+            if getattr(self, 'external_sink', False) is False:
+                try:
+                    from cable_core.config import ConfigManager
+                    config_manager = ConfigManager()
+                    module_ids_json = config_manager.get_str_setting('virtual_sink_module_ids', '{}')
+
+                    if module_ids_json:
+                        import json
+                        module_ids = json.loads(module_ids_json)
+
+                        # Find the key that matches this client (either exact or partial match)
+                        key_to_remove = None
+                        for stored_sink_name in module_ids.keys():
+                            if self.client_name == stored_sink_name or self.client_name.startswith(stored_sink_name + ' '):
+                                key_to_remove = stored_sink_name
+                                break
+
+                        if key_to_remove:
+                            del module_ids[key_to_remove]
+                            config_manager.set_str_setting('virtual_sink_module_ids', json.dumps(module_ids))
+                            print(f"Removed module ID {module_id} from config for sink '{key_to_remove}' (client: {self.client_name})")
+                        else:
+                            print(f"Warning: Could not find config entry to remove for {self.client_name}")
+
+                except Exception as e:
+                    print(f"Error removing module ID from config for {self.client_name}: {e}")
+
+        except subprocess.CalledProcessError as e:
+            print(f"Error unloading virtual sink {self.client_name}: {e}")
