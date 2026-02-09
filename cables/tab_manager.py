@@ -54,6 +54,11 @@ class TabManager:
         # Get reference to tab widget from ui_manager
         self.tab_widget = self.connection_manager.ui_manager.tab_widget
 
+        # Check if Cable should be integrated as the first tab
+        self.integrated_mode = self.connection_manager.config_manager.get_bool('integrate_cable_and_cables', False)
+        if self.integrated_mode:
+            self._add_cable_tab()
+
         # Setup individual tabs
         self.tab_ui_manager.setup_port_tab(
             self.connection_manager, self.connection_manager.ui_manager.audio_tab_widget, "Audio", 'audio'
@@ -117,6 +122,19 @@ class TabManager:
         self._update_global_zoom_action_state(current_tab)
 
         self._setup_midi_matrix_v_splitter()
+
+    def _add_cable_tab(self):
+        """Add Cable (PipeWireSettingsApp) as the first tab when integrated mode is enabled."""
+        # Use local import to avoid circular imports
+        from Cable import PipeWireSettingsApp
+        
+        # Create Cable widget in embedded mode
+        self.cable_widget = PipeWireSettingsApp(embedded=True, parent=self.tab_widget)
+        self.connection_manager.cable_widget = self.cable_widget  # Store reference on connection manager
+        
+        # Insert as the first tab
+        self.tab_widget.insertTab(0, self.cable_widget, "Cable")
+        print("Added Cable tab in integrated mode")
 
     def _setup_midi_matrix_v_splitter(self):
         """Setup MIDI Matrix vertical splitter position loading and saving."""
@@ -190,6 +208,14 @@ class TabManager:
                     self.connection_manager.alsa_mixer_app.start_updates()
         elif current_tab_text == "Latency Test":
             self.show_bottom_controls(False)
+        elif current_tab_text == "Cable":
+            self.show_bottom_controls(False)
+            # Refresh Cable's pipewire settings when switching to Cable tab
+            if hasattr(self, 'cable_widget') and self.cable_widget:
+                self.cable_widget.pipewire_manager.load_current_settings()
+                self.cable_widget.pipewire_manager.load_devices()
+                self.cable_widget.pipewire_manager.load_nodes()
+                self.cable_widget.update_latency_display()
 
         # Stop ALSA mixer updates when switching away from the tab
         if self.tab_widget.tabText(self.last_active_tab) == "ALSA Mixer" and hasattr(self.connection_manager, 'alsa_mixer_app') and self.connection_manager.alsa_mixer_app:
@@ -203,9 +229,6 @@ class TabManager:
 
         # Update global zoom action enabled state
         self._update_global_zoom_action_state(index)
-
-        if hasattr(self.connection_manager, 'ui_state_manager') and self.connection_manager.ui_state_manager:
-             self.connection_manager.ui_state_manager._update_refresh_timer_interval()
 
     def show_bottom_controls(self, visible: bool):
         """

@@ -59,9 +59,15 @@ class JackConnectionManager(QMainWindow):
     client_registered = pyqtSignal(str, bool) # client_name, is_registered
     ports_connected = pyqtSignal(str, str, bool) # out_port_name, in_port_name, is_connected
     
-    def __init__(self):
-        """Initialize the JackConnectionManager."""
+    def __init__(self, load_startup_preset=False):
+        """Initialize the JackConnectionManager.
+        
+        Args:
+            load_startup_preset: If True, load the configured startup preset on init.
+                                 Should be True for --minimized and headless modes.
+        """
         super().__init__()
+        self._load_startup_preset = load_startup_preset
 
         self._graph_is_fullscreen = False
         self._widgets_original_visibility = {} # For storing visibility of main UI chrome
@@ -101,7 +107,7 @@ class JackConnectionManager(QMainWindow):
         self.ui_manager = UIManager(self, self.config_manager)
 
         # Initialize Connection Visualizer
-        self.connection_visualizer = ConnectionVisualizer(self.client, self.ui_manager)
+        self.connection_visualizer = ConnectionVisualizer(self.client, self.ui_manager, self.config_manager)
         
         self.client.set_port_registration_callback(self._handle_port_registration)
         self.client.set_client_registration_callback(self._handle_client_registration)
@@ -230,6 +236,9 @@ class JackConnectionManager(QMainWindow):
         if hasattr(self, 'midi_presets_button') and self.midi_presets_button:
             self.midi_presets_button.clicked.connect(self.preset_handler._show_preset_menu)
         
+        # Connect JACK signals to connection view refresh for event-driven updates
+        self._connect_jack_signals_to_connection_views()
+        
         self.client.activate()
 
         # Clean up orphaned unified sinks immediately on startup (before any UI)
@@ -240,8 +249,8 @@ class JackConnectionManager(QMainWindow):
         if hasattr(self.action_manager, 'save_preset_action') and self.action_manager.save_preset_action:
             self.action_manager.save_preset_action.setEnabled(bool(self.preset_handler.current_preset_name))
 
-        # Load startup preset if configured
-        if self.preset_handler.startup_preset_name and self.preset_handler.startup_preset_name != 'None':
+        # Load startup preset if configured and requested (only for --minimized or headless modes)
+        if self._load_startup_preset and self.preset_handler.startup_preset_name and self.preset_handler.startup_preset_name != 'None':
             startup_preset = self.preset_handler.startup_preset_name
             print(f"Loading startup preset '{startup_preset}'...")
             # Load the preset without showing a success message (is_startup=True)
@@ -340,6 +349,70 @@ class JackConnectionManager(QMainWindow):
     def _setup_ui(self):
         # UI setup is now handled by UIManager
         pass
+
+    def closeEvent(self, event):
+        """Handle window close event - hide to tray if Cable is embedded and tray is enabled."""
+        # Check if Cable is embedded and has tray enabled
+        if hasattr(self, 'cable_widget') and self.cable_widget:
+            cable = self.cable_widget
+            if cable.tray_enabled and cable.tray_manager.tray_icon and cable.tray_manager.tray_icon.isVisible():
+                # Hide to tray instead of closing
+                event.ignore()
+                self.hide()
+                return
+        
+        # Stop aj-snapshot daemon on quit
+        self._cleanup_on_quit()
+        
+        # Otherwise, close normally
+        event.accept()
+    
+    def _cleanup_on_quit(self):
+        """Cleanup resources when the application is quitting."""
+        if hasattr(self, 'preset_manager') and self.preset_manager:
+            self.preset_manager.stop_daemon_mode()
+        if hasattr(self, 'config_manager') and self.config_manager:
+            self.config_manager.flush()
+        # Flush graph node positions
+        if hasattr(self, 'graph_scene') and self.graph_scene and hasattr(self.graph_scene, 'node_config_manager'):
+            self.graph_scene.node_config_manager.flush()
+    
+    def _connect_jack_signals_to_connection_views(self):
+        """
+        Connect JACK event signals to connection view refresh.
+        
+        This enables event-driven refresh when connections change,
+        ensuring the visualization updates without constant polling.
+        """
+        # Audio connection view: refresh on any connection change
+        if hasattr(self, 'connection_view') and self.connection_view:
+            self.connection_made.connect(
+                lambda out, inp: self.connection_view.request_refresh()
+            )
+            self.connection_broken.connect(
+                lambda out, inp: self.connection_view.request_refresh()
+            )
+            self.port_added.connect(
+                lambda *args: self.connection_view.request_refresh()
+            )
+            self.port_removed.connect(
+                lambda *args: self.connection_view.request_refresh()
+            )
+        
+        # MIDI connection view: refresh on any connection change
+        if hasattr(self, 'midi_connection_view') and self.midi_connection_view:
+            self.connection_made.connect(
+                lambda out, inp: self.midi_connection_view.request_refresh()
+            )
+            self.connection_broken.connect(
+                lambda out, inp: self.midi_connection_view.request_refresh()
+            )
+            self.port_added.connect(
+                lambda *args: self.midi_connection_view.request_refresh()
+            )
+            self.port_removed.connect(
+                lambda *args: self.midi_connection_view.request_refresh()
+            )
     
     def refresh_visualizations(self):
         if self.port_type == 'audio':
@@ -655,6 +728,16 @@ class JackConnectionManager(QMainWindow):
             is_focused = self.isActiveWindow()
             if hasattr(self, 'ui_state_manager'):
                  self.ui_state_manager.handle_focus_change(is_focused)
+
+            # Refresh embedded Cable settings when window gains focus
+            if is_focused and hasattr(self, 'cable_widget') and self.cable_widget:
+                current_tab_index = self.ui_manager.tab_widget.currentIndex()
+                current_tab_text = self.ui_manager.tab_widget.tabText(current_tab_index)
+                if current_tab_text == "Cable":
+                    self.cable_widget.pipewire_manager.load_current_settings()
+                    self.cable_widget.pipewire_manager.load_devices()
+                    self.cable_widget.pipewire_manager.load_nodes()
+                    self.cable_widget.update_latency_display()
 
             # Manage ALSA mixer updates based on focus and active tab
             if hasattr(self.ui_manager, 'tab_widget') and hasattr(self.ui_manager, 'alsa_mixer_tab_widget') and hasattr(self, 'alsa_mixer_app'):

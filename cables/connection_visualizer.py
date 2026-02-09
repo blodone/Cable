@@ -20,16 +20,18 @@ class ConnectionVisualizer:
     including path calculation, color generation, and scene management.
     """
     
-    def __init__(self, jack_client, ui_manager):
+    def __init__(self, jack_client, ui_manager, config_manager=None):
         """
         Initialize the ConnectionVisualizer.
         
         Args:
             jack_client: JACK client for accessing ports and connections
             ui_manager: UI manager for accessing theme settings
+            config_manager: Config manager for loading settings
         """
         self.jack_client = jack_client
         self.ui_manager = ui_manager
+        self.config_manager = config_manager
     
     def update_connection_graphics(self, scene, view, output_tree, input_tree, is_midi):
         """
@@ -71,14 +73,21 @@ class ConnectionVisualizer:
                 path = QPainterPath()
                 path.moveTo(start_pos)
                 
-                ctrl1_x = start_pos.x() + (end_pos.x() - start_pos.x()) / 3
-                ctrl2_x = start_pos.x() + 2 * (end_pos.x() - start_pos.x()) / 3
+                # Check if straight lines are enabled
+                use_straight = False
+                if self.config_manager:
+                    use_straight = self.config_manager.get_bool('use_straight_lines', False)
                 
-                path.cubicTo(
-                    QPointF(ctrl1_x, start_pos.y()),
-                    QPointF(ctrl2_x, end_pos.y()),
-                    end_pos
-                )
+                if use_straight:
+                    path.lineTo(end_pos)
+                else:
+                    ctrl1_x = start_pos.x() + (end_pos.x() - start_pos.x()) / 3
+                    ctrl2_x = start_pos.x() + 2 * (end_pos.x() - start_pos.x()) / 3
+                    path.cubicTo(
+                        QPointF(ctrl1_x, start_pos.y()),
+                        QPointF(ctrl2_x, end_pos.y()),
+                        end_pos
+                    )
                 
                 base_name = output_name.rsplit(':', 1)[0]
                 
@@ -91,12 +100,15 @@ class ConnectionVisualizer:
                     v = min(1.0, v * 1.3)
                     base_color.setHsvF(h, s, v, a)
                 
-                pen = QPen(base_color, 2)
+                # Get line thickness from config
+                line_thickness = 2
+                if self.config_manager:
+                    line_thickness = self.config_manager.get_int_setting('CONNECTION_LINE_THICKNESS', 2)
+                pen = QPen(base_color, line_thickness)
+                pen.setCosmetic(True)
                 path_item = QGraphicsPathItem(path)
                 path_item.setPen(pen)
                 scene.addItem(path_item)
-        
-        view.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
     
     def get_port_position(self, tree_widget, port_name, connection_view, is_output):
         """

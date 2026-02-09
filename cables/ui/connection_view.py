@@ -3,16 +3,20 @@ ConnectionView - Visualizes connections between ports
 """
 
 from PyQt6.QtWidgets import QGraphicsView
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QPainter
+
 
 class ConnectionView(QGraphicsView):
     """
     A custom QGraphicsView for visualizing connections between ports.
     
     This class provides a view for displaying connection lines between
-    audio or MIDI ports, with support for automatic refreshing.
+    audio or MIDI ports, with support for event-driven refreshing.
     """
+    
+    # Signal to trigger refresh from any thread safely
+    refresh_requested = pyqtSignal()
     
     def __init__(self, scene, parent=None):
         """
@@ -24,23 +28,74 @@ class ConnectionView(QGraphicsView):
         """
         super().__init__(scene, parent)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        # Use BoundingRectViewportUpdate instead of FullViewportUpdate for better performance
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        
+        # Optimization flags
+        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing, True)
+        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontSavePainterState, True)
+        
+        # Debounced refresh timer - 16ms for ~60fps cap
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(16)
+        
+        self._refresh_callback = None
+        
+        # Connect internal signal for thread-safe refresh requests
+        self.refresh_requested.connect(self._schedule_refresh)
+        
+        # Legacy timer for compatibility (will be removed/unused)
         self.refresh_timer = QTimer()
+    
+    def set_refresh_callback(self, callback):
+        """
+        Set the callback function for refreshing connections.
+        
+        Args:
+            callback: Function to call when connections need to be redrawn
+        """
+        self._refresh_callback = callback
+        # Disconnect any previous connection to avoid duplicates
+        try:
+            self._refresh_timer.timeout.disconnect()
+        except TypeError:
+            pass
+        self._refresh_timer.timeout.connect(self._do_refresh)
+    
+    def _schedule_refresh(self):
+        """Schedule a debounced refresh - restarts the timer if already running."""
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start()
+    
+    def _do_refresh(self):
+        """Execute the refresh callback."""
+        if self._refresh_callback:
+            self._refresh_callback()
+    
+    def request_refresh(self):
+        """
+        Request a connection refresh. This is debounced to ~60fps.
+        Safe to call from any context.
+        """
+        self.refresh_requested.emit()
     
     def start_refresh_timer(self, refresh_callback, interval=1000):
         """
-        Start the refresh timer to periodically update the view.
+        Legacy method - now sets up event-driven refresh instead.
+        The interval parameter is ignored; refresh is event-driven with debouncing.
         
         Args:
             refresh_callback: The function to call when refreshing
-            interval: The refresh interval in milliseconds
+            interval: Ignored (kept for API compatibility)
         """
-        self.refresh_timer.timeout.connect(refresh_callback)
-        self.refresh_timer.start(interval)
+        self.set_refresh_callback(refresh_callback)
+        # Do an initial refresh
+        self._schedule_refresh()
     
     def resizeEvent(self, event):
         """
@@ -51,6 +106,8 @@ class ConnectionView(QGraphicsView):
         """
         super().resizeEvent(event)
         self.fitInView(self.scene().sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        # Schedule refresh after resize to update connection positions
+        self._schedule_refresh()
     
     def connect_to_jack(self, jack_client):
         """
@@ -60,8 +117,7 @@ class ConnectionView(QGraphicsView):
             jack_client: The JACK client instance to connect to
         """
         self.jack_client = jack_client
-        self._port_cache = {}  # Clear cache when connecting to new client
-        self._poll_timer = QTimer()
+        self._port_cache = {}
     
     def connect_to_jack_signals(self, client):
         """
@@ -70,43 +126,12 @@ class ConnectionView(QGraphicsView):
         Args:
             client: The JACK client instance to connect signals for
         """
-        # Connect signals to update the view when ports or connections change
-        client.port_registered = self._on_port_registered
-        client.connection_changed = self._on_connection_changed
-    def _poll_jack_ports(self):
-        """Poll JACK server for port changes and update visualization."""
-        if not self.jack_client:
-            return
-            
-        try:
-            # Get all ports
-            all_ports = self.jack_client.get_ports()
-            current_ports = {port.name: port for port in all_ports}
-            
-            # Check for removed ports
-            removed_ports = set(self._port_cache.keys()) - set(current_ports.keys())
-            for port_name in removed_ports:
-                self._on_port_removed(port_name)
-            
-            # Check for new or changed ports
-            for port_name, port in current_ports.items():
-                if port_name not in self._port_cache or self._port_cache[port_name].is_input != port.is_input:
-                    self._on_port_added(port)
-            
-            # Update cache
-            self._port_cache = current_ports
-            
-            # Update visualization after port changes
-            self.scene().update()
-            
-        except jack.JackError as e:
-            print(f"Error polling JACK ports: {e}")
-            return
+        pass
     
     def _on_port_registered(self, port):
         """Handle port registration events."""
-        self.viewport().update()
+        self.refresh_requested.emit()
     
     def _on_connection_changed(self, port1, port2, is_connected):
         """Handle connection change events."""
-        self.viewport().update()
+        self.refresh_requested.emit()

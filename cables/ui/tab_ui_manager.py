@@ -92,19 +92,25 @@ class TabUIManager:
         )
 
         # Add buttons to layout with stretches for centering
-        button_layout.addStretch()  # Push buttons to center
+        button_layout.addStretch()
         button_layout.addWidget(connect_button)
         button_layout.addWidget(disconnect_button)
         button_layout.addWidget(presets_button)
-        button_layout.addWidget(node_visibility_button)  # Add in line with other buttons
-        button_layout.addStretch()  # Push buttons to center
+        button_layout.addWidget(node_visibility_button)
+        button_layout.addStretch()
 
-        # Add button widget to main layout
+        # Add button widget to main layout with fixed height
+        button_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(button_widget)
 
-        # Create port list layouts
-        input_layout = QVBoxLayout()
-        output_layout = QVBoxLayout()
+        # Create port list widgets with labels
+        input_widget = QWidget()
+        input_layout = QVBoxLayout(input_widget)
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        output_widget = QWidget()
+        output_layout = QVBoxLayout(output_widget)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        
         input_label = QLabel(f' {tab_name} Input Ports')
         output_label = QLabel(f' {tab_name} Output Ports')
         
@@ -124,7 +130,6 @@ class TabUIManager:
         from cables.ui.connection_view import ConnectionView
         connection_scene = QGraphicsScene()
         connection_view = ConnectionView(connection_scene)
-        # Connect to JACK client signals for real-time updates
         connection_view.connect_to_jack_signals(manager.client)
         
         # Apply styles
@@ -142,35 +147,56 @@ class TabUIManager:
         output_layout.addWidget(output_label)
         output_layout.addWidget(output_tree)
         
-        # Create middle layout with connection view
-        middle_layout = QVBoxLayout()
-        # Add spacer to align with port areas
+        # Create middle widget with connection view
+        middle_widget = QWidget()
+        middle_layout = QVBoxLayout(middle_widget)
+        middle_layout.setContentsMargins(0, 0, 0, 0)
         middle_layout.addSpacerItem(QSpacerItem(20, 30, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed))
         middle_layout.addWidget(connection_view)
         
-        # Create middle layout widget
-        middle_layout_widget = QWidget()
-        middle_layout_widget.setLayout(middle_layout)
-        middle_layout_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        # Load connection view width from config or use app_config default
-        connection_view_initial_width = manager.config_manager.get_int_setting("CONNECTION_VIEW_INITIAL_WIDTH", app_config.CONNECTION_VIEW_INITIAL_WIDTH)
-        middle_layout_widget.setFixedWidth(connection_view_initial_width)
+        # Create splitter for resizable panels
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
+        splitter.setStyleSheet("QSplitter::handle { background: transparent; }")
+        splitter.addWidget(output_widget)
+        splitter.addWidget(middle_widget)
+        splitter.addWidget(input_widget)
         
-        # For MIDI tab, use splitter with traditional view on top and matrix view on bottom
-        if port_type == 'midi':
-            # For Audio tab, use traditional layout
-            content_layout = QHBoxLayout()
-            content_layout.addLayout(output_layout)
-            content_layout.addWidget(middle_layout_widget)
-            content_layout.addLayout(input_layout)
-            layout.addLayout(content_layout)
-        else:
-            # For Audio tab, use traditional layout
-            content_layout = QHBoxLayout()
-            content_layout.addLayout(output_layout)
-            content_layout.addWidget(middle_layout_widget)
-            content_layout.addLayout(input_layout)
-            layout.addLayout(content_layout)
+        # Set minimum widths
+        output_widget.setMinimumWidth(150)
+        input_widget.setMinimumWidth(150)
+        middle_widget.setMinimumWidth(50)
+        
+        # Load saved splitter sizes or use defaults
+        connection_view_initial_width = manager.config_manager.get_int_setting(
+            "CONNECTION_VIEW_INITIAL_WIDTH", app_config.CONNECTION_VIEW_INITIAL_WIDTH
+        )
+        config_key = f"{port_type}_splitter_sizes"
+        saved_sizes = manager.config_manager.get_str(config_key, "")
+        
+        if saved_sizes:
+            try:
+                sizes = [int(s) for s in saved_sizes.split(",")]
+                if len(sizes) == 3:
+                    splitter.setSizes(sizes)
+            except ValueError:
+                pass
+        
+        if not saved_sizes or len(saved_sizes.split(",")) != 3:
+            # Default: equal space for trees, configured width for middle
+            total_width = 1200  # Approximate initial width
+            tree_width = (total_width - connection_view_initial_width) // 2
+            splitter.setSizes([tree_width, connection_view_initial_width, tree_width])
+        
+        # Save splitter sizes when changed
+        def save_splitter_sizes():
+            sizes = splitter.sizes()
+            manager.config_manager.set_str(config_key, ",".join(str(s) for s in sizes))
+            connection_view.request_refresh()
+        
+        splitter.splitterMoved.connect(lambda: save_splitter_sizes())
+        
+        layout.addWidget(splitter)
         
         # Store references in manager
         if port_type == 'audio':
@@ -180,18 +206,8 @@ class TabUIManager:
             manager.connection_view = connection_view
             manager.connect_button = connect_button
             manager.disconnect_button = disconnect_button
-            # Refresh button reference removed
             manager.presets_button = presets_button
             manager.audio_node_visibility_button = node_visibility_button
-            
-            # Signal connections are now handled by QAction via button.setDefaultAction()
-            # in create_action_button.
-            # The QActions (e.g., audio_connect_action, presets_action) must be connected
-            # to their respective handlers within the ActionManager or JackConnectionManager.
-            # The enabled state of presets_button is also handled by presets_action.
-            
-            # Filter signals are now connected in PortManager.set_trees() after trees are created.
-            # No need to connect them here anymore.
 
         elif port_type == 'midi':
             manager.midi_input_tree = input_tree
@@ -200,18 +216,36 @@ class TabUIManager:
             manager.midi_connection_view = connection_view
             manager.midi_connect_button = connect_button
             manager.midi_disconnect_button = disconnect_button
-            # Refresh button reference removed
             manager.midi_presets_button = presets_button
             manager.midi_node_visibility_button = node_visibility_button
-            
-            # Signal connections are now handled by QAction via button.setDefaultAction()
-            # in create_action_button.
-            # The QActions (e.g., midi_connect_action, presets_action) must be connected
-            # to their respective handlers within the ActionManager or JackConnectionManager.
-            # The enabled state of presets_button is also handled by presets_action.
         
-        # Initial font size is now applied by UIStateManager after it's initialized
-        # manager._apply_port_list_font_size() # Removed call
+        # Connect tree signals to trigger connection view refresh on scroll/expand/collapse
+        self._connect_tree_refresh_signals(input_tree, connection_view)
+        self._connect_tree_refresh_signals(output_tree, connection_view)
+    
+    def _connect_tree_refresh_signals(self, tree, connection_view):
+        """
+        Connect tree widget signals to connection view refresh.
+        
+        This enables event-driven refresh when the user scrolls, expands, 
+        or collapses tree items, ensuring connection lines stay aligned.
+        
+        Args:
+            tree: The PortTreeWidget to connect signals from
+            connection_view: The ConnectionView to refresh
+        """
+        if not tree or not connection_view:
+            return
+        
+        # Scroll events
+        if tree.verticalScrollBar():
+            tree.verticalScrollBar().valueChanged.connect(
+                lambda _: connection_view.request_refresh()
+            )
+        
+        # Expand/collapse events
+        tree.itemExpanded.connect(lambda _: connection_view.request_refresh())
+        tree.itemCollapsed.connect(lambda _: connection_view.request_refresh())
 
     def setup_midi_matrix_tab(self, manager, tab_widget):
         """

@@ -5,8 +5,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer, Qt
 from PyQt6.QtWidgets import QCheckBox, QPushButton, QTreeWidget
 from PyQt6.QtGui import QFont
 
-# Import constants for refresh rates
-from cable_core import app_config
+
 
 # Import necessary types for hinting (adjust paths if needed)
 # from .config.config_manager import ConfigManager
@@ -139,72 +138,31 @@ class UIStateManager(QObject):
         self._update_timer_state(is_checked)
 
     def _update_timer_state(self, enabled: bool):
-        """Starts/stops visualization timers and sets the correct interval."""
+        """Sets up event-driven refresh for connection views."""
         if enabled:
-            if self.connection_view and hasattr(self.main_window, 'refresh_visualizations'):
-                # Start timer with a placeholder interval (1ms), will be adjusted immediately
-                self.connection_view.start_refresh_timer(self.main_window.refresh_visualizations, interval=1)
+            if self.connection_view and hasattr(self.main_window, 'update_connections'):
+                self.connection_view.set_refresh_callback(self.main_window.update_connections)
+                # Do an initial refresh
+                self.connection_view.request_refresh()
             else:
-                 logger.warning("Audio ConnectionView or refresh_visualizations method missing.")
+                logger.warning("Audio ConnectionView or update_connections method missing.")
 
-            if self.midi_connection_view and hasattr(self.main_window, 'refresh_visualizations'):
-                 self.midi_connection_view.start_refresh_timer(self.main_window.refresh_visualizations, interval=1)
+            if self.midi_connection_view and hasattr(self.main_window, 'update_midi_connections'):
+                self.midi_connection_view.set_refresh_callback(self.main_window.update_midi_connections)
+                # Do an initial refresh
+                self.midi_connection_view.request_refresh()
             else:
-                 logger.warning("MIDI ConnectionView or refresh_visualizations method missing.")
-
-            # Set the correct interval based on current focus and tab
-            self._update_refresh_timer_interval()
+                logger.warning("MIDI ConnectionView or update_midi_connections method missing.")
+            logger.debug("Event-driven refresh enabled for connection views")
         else:
-            # Stop timers
-            if self.connection_view and hasattr(self.connection_view, 'refresh_timer'):
-                self.connection_view.refresh_timer.stop()
-            if self.midi_connection_view and hasattr(self.midi_connection_view, 'refresh_timer'):
-                self.midi_connection_view.refresh_timer.stop()
-            logger.debug("Auto Refresh Timers Stopped")
-
-    def _update_refresh_timer_interval(self):
-        """Adjusts the visualization refresh timer interval based on focus and active tab."""
-        if not self._callbacks_enabled: # Only adjust if auto-refresh is on
-             return
-
-        if not self.main_window or not hasattr(self.main_window.ui_manager, 'tab_widget'):
-            logger.warning("Cannot update timer interval: main window or ui_manager.tab_widget missing.")
-            return
-
-        # Determine interval based on focus and tab using constants from app_config
-        interval = app_config.REFRESH_RATE_UNFOCUSED_MS # Default unfocused
-        if self._is_focused:
-            current_index = self.main_window.ui_manager.tab_widget.currentIndex()
-            # Indices for tabs that should use the slower refresh rate when focused
-            special_tabs_indices = [2, 3, 4, 5] # Graph, Alsa Mixer, pw-top, Latency Test
-            if current_index in [0, 1]: # Audio or MIDI tab
-                interval = app_config.REFRESH_RATE_FOCUSED_MS
-            elif current_index in special_tabs_indices:
-                 interval = app_config.REFRESH_RATE_SPECIAL_TABS_MS
-            else: # Fallback for any other tabs (shouldn't happen with current tabs, but good practice)
-                 interval = app_config.REFRESH_RATE_FOCUSED_MS
-        # else: # Not focused - already set as default above
-
-        logger.debug(f"Setting refresh interval to: {interval} ms (Focused: {self._is_focused})")
-
-        # Apply interval to active timers
-        try:
-            if self.connection_view and hasattr(self.connection_view, 'refresh_timer') and self.connection_view.refresh_timer.isActive():
-                self.connection_view.refresh_timer.setInterval(interval)
-            if self.midi_connection_view and hasattr(self.midi_connection_view, 'refresh_timer') and self.midi_connection_view.refresh_timer.isActive():
-                self.midi_connection_view.refresh_timer.setInterval(interval)
-        except AttributeError as e:
-            logger.warning(f"Could not access refresh_timer to set interval: {e}")
-
+            logger.debug("Auto Refresh disabled (event-driven refresh remains active)")
 
     def handle_focus_change(self, focused: bool):
         """Handles the main window gaining or losing focus."""
         if self._is_focused == focused:
-             return # No change
+            return
         self._is_focused = focused
         logger.debug(f"Focus Changed: {self._is_focused}")
-        # Update timer interval if auto-refresh is enabled
-        self._update_refresh_timer_interval()
 
     # --- Collapse All Logic ---
     def toggle_collapse_all(self, state):

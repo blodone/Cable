@@ -1,6 +1,7 @@
 import os
 import sys
-from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication, QMessageBox
+from PyQt6.QtWidgets import (QSystemTrayIcon, QMenu, QApplication, QMessageBox, 
+                             QLabel, QWidgetAction)
 from PyQt6.QtGui import QIcon, QAction, QActionGroup
 from PyQt6.QtCore import Qt, QProcess
 
@@ -18,7 +19,9 @@ class TrayManager:
 
     def setup_tray_icon(self):
         if not self.tray_icon:
-            print(f"Setting up tray icon with tray_click_opens_cables: {self.app.tray_click_opens_cables}")
+            # Check if integrated mode is enabled
+            self.integrated_mode = self.app.config_manager.get_bool('integrate_cable_and_cables', False)
+            print(f"Setting up tray icon with tray_click_opens_cables: {self.app.tray_click_opens_cables}, integrated_mode: {self.integrated_mode}")
             self.tray_icon = QSystemTrayIcon(self.app) # Parent is the app
 
             # --- Icon Loading Logic ---
@@ -82,49 +85,56 @@ class TrayManager:
             # Create the menu
             tray_menu = QMenu(self.app) # Parent is the app
 
-            # Create regular menu items for direct access
-            show_cable_action = QAction("Cable", self.app)
-            show_cables_action = QAction("Cables", self.app)
+            if self.integrated_mode:
+                # Simplified menu for integrated mode: just "Open" to launch Cables
+                open_action = QAction("Open", self.app)
+                open_action.triggered.connect(self.handle_cables_action)
+                tray_menu.addAction(open_action)
+                tray_menu.addSeparator()
+            else:
+                # Create regular menu items for direct access
+                show_cable_action = QAction("Cable", self.app)
+                show_cables_action = QAction("Cables", self.app)
 
-            # Connect the regular menu items
-            show_cable_action.triggered.connect(self.handle_show_action) # Internal call
-            show_cables_action.triggered.connect(self.handle_cables_action) # Internal call
+                # Connect the regular menu items
+                show_cable_action.triggered.connect(self.handle_show_action) # Internal call
+                show_cables_action.triggered.connect(self.handle_cables_action) # Internal call
 
-            # Create a submenu for click behavior selection
-            click_menu = QMenu("Default App", self.app) # Parent is the app
+                # Create a submenu for click behavior selection
+                click_menu = QMenu("Default App", self.app) # Parent is the app
 
-            # Create actions for the radio buttons
-            self.cable_action = QAction("Cable", self.app) # Store reference
-            self.cables_action = QAction("Cables", self.app) # Store reference
+                # Create actions for the radio buttons
+                self.cable_action = QAction("Cable", self.app) # Store reference
+                self.cables_action = QAction("Cables", self.app) # Store reference
 
-            # Make them checkable and exclusive
-            self.cable_action.setCheckable(True)
-            self.cables_action.setCheckable(True)
+                # Make them checkable and exclusive
+                self.cable_action.setCheckable(True)
+                self.cables_action.setCheckable(True)
 
-            # Set initial state based on loaded setting (now guaranteed to be boolean)
-            self.cable_action.setChecked(not bool(self.app.tray_click_opens_cables))
-            self.cables_action.setChecked(bool(self.app.tray_click_opens_cables))
+                # Set initial state based on loaded setting (now guaranteed to be boolean)
+                self.cable_action.setChecked(not bool(self.app.tray_click_opens_cables))
+                self.cables_action.setChecked(bool(self.app.tray_click_opens_cables))
 
-            # Create an action group to make the selection exclusive
-            action_group = QActionGroup(self.app) # Parent is the app
-            action_group.addAction(self.cable_action)
-            action_group.addAction(self.cables_action)
-            action_group.setExclusive(True)
+                # Create an action group to make the selection exclusive
+                action_group = QActionGroup(self.app) # Parent is the app
+                action_group.addAction(self.cable_action)
+                action_group.addAction(self.cables_action)
+                action_group.setExclusive(True)
 
-            # Connect the actions to update the tray click behavior
-            self.cable_action.triggered.connect(lambda: self.set_tray_click_target(False)) # Internal call
-            self.cables_action.triggered.connect(lambda: self.set_tray_click_target(True)) # Internal call
+                # Connect the actions to update the tray click behavior
+                self.cable_action.triggered.connect(lambda: self.set_tray_click_target(False)) # Internal call
+                self.cables_action.triggered.connect(lambda: self.set_tray_click_target(True)) # Internal call
 
-            # Add actions to the click submenu
-            click_menu.addAction(self.cable_action)
-            click_menu.addAction(self.cables_action)
+                # Add actions to the click submenu
+                click_menu.addAction(self.cable_action)
+                click_menu.addAction(self.cables_action)
 
-            # Build the complete menu
-            tray_menu.addAction(show_cable_action)
-            tray_menu.addAction(show_cables_action)
-            tray_menu.addSeparator()
-            tray_menu.addMenu(click_menu)
-            tray_menu.addSeparator()
+                # Build the complete menu
+                tray_menu.addAction(show_cable_action)
+                tray_menu.addAction(show_cables_action)
+                tray_menu.addSeparator()
+                tray_menu.addMenu(click_menu)
+                tray_menu.addSeparator()
 
             # Add autostart toggle
             self.autostart_action = QAction("Autostart", self.app) # Store reference
@@ -200,11 +210,37 @@ class TrayManager:
 
     def handle_cables_action(self):
         """Handle selection of 'Cables' from tray menu"""
+        # When embedded, show/hide the parent Cables window instead of launching a new process
+        if getattr(self.app, 'embedded', False):
+            self._toggle_parent_window()
+            return
         self.app.process_manager._ensure_connection_manager_visible() # Use process_manager
+
+    def _toggle_parent_window(self):
+        """Toggle visibility of the parent Cables window when embedded."""
+        # Find the top-level parent window (Cables/JackConnectionManager)
+        parent_window = self.app.window()
+        if parent_window:
+            if parent_window.isMinimized() or not parent_window.isVisible():
+                parent_window.showNormal()
+                parent_window.activateWindow()
+                parent_window.raise_()
+            else:
+                parent_window.hide()
 
     def tray_icon_activated(self, reason):
         """Handle tray icon activation (clicks)"""
         if reason == QSystemTrayIcon.ActivationReason.Trigger:  # Left click
+            # When embedded, toggle the parent Cables window
+            if getattr(self.app, 'embedded', False):
+                self._toggle_parent_window()
+                return
+            
+            # In integrated mode (standalone Cable redirecting to Cables), open Cables
+            if getattr(self, 'integrated_mode', False):
+                self.handle_cables_action()
+                return
+            
             if self.app.tray_click_opens_cables:  # Check the app's toggle
                 if self.app.process_manager.connection_manager_process is None or (
                     hasattr(self.app.process_manager.connection_manager_process, 'state') and
@@ -283,6 +319,26 @@ class TrayManager:
         # Add separator between restore settings and update options
         context_menu.addSeparator()
 
+        # Add version label above check for updates
+        version_container = QLabel()
+        version_container.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version_container.setContentsMargins(10, 5, 10, 5)
+        
+        curr_version = self.app.update_manager.app_version
+        if self.app.update_manager.update_available:
+            latest = self.app.update_manager.latest_version
+            version_text = f'<a href="https://github.com/magillos/Cable/releases" style="color: orange; text-decoration: none;">Version: {curr_version} (Update: {latest})</a>'
+        else:
+            version_text = f'<a href="https://github.com/magillos/Cable/releases" style="color: grey; text-decoration: none;">Version: {curr_version}</a>'
+        
+        version_container.setText(version_text)
+        version_container.setOpenExternalLinks(True)
+        version_container.setTextFormat(Qt.TextFormat.RichText)
+
+        version_widget_action = QWidgetAction(self.app)
+        version_widget_action.setDefaultWidget(version_container)
+        context_menu.addAction(version_widget_action)
+
         check_now_action = QAction("Check for new version", self.app)
         # Use lambda to pass manual_check=True
         check_now_action.triggered.connect(lambda: self.app.update_manager.check_for_updates(manual_check=True))
@@ -301,13 +357,34 @@ class TrayManager:
         
         context_menu.addSeparator() # Add separator before "Other Settings"
 
-        # Add "Other Settings" menu item at the very bottom
+        # Add "Other Settings" menu item
         other_settings_action = QAction("Other Settings", self.app)
         other_settings_action.triggered.connect(self._show_other_settings_dialog)
         context_menu.addAction(other_settings_action)
 
+        context_menu.addSeparator()
+
+
+
+        context_menu.addSeparator()
+
+        # Add Buy Me a Coffee link at the very bottom
+        coffee_container = QLabel()
+        coffee_container.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        coffee_container.setContentsMargins(10, 0, 10, 10)
+        
+        coffee_text = '<a href="https://buymeacoffee.com/magillos" style="color: #FF813F; text-decoration: none; font-weight: bold;">☕ Buy me a coffee</a>'
+        
+        coffee_container.setText(coffee_text)
+        coffee_container.setOpenExternalLinks(True)
+        coffee_container.setTextFormat(Qt.TextFormat.RichText)
+        
+        coffee_widget_action = QWidgetAction(self.app)
+        coffee_widget_action.setDefaultWidget(coffee_container)
+        context_menu.addAction(coffee_widget_action)
+
         # Show the menu at the global position of the click
-        context_menu.exec(self.app.version_label.mapToGlobal(pos)) # Use app's label
+        context_menu.exec(self.app.settings_button.mapToGlobal(pos)) # Use app's settings button
 
     def _show_other_settings_dialog(self):
         """Opens the Other Settings dialog."""
